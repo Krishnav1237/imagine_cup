@@ -1,13 +1,15 @@
 """
-Adaptive Learning Engine
-Adjusts content delivery based on real-time attention tracking
+Adaptive Learning Engine.
+Adjusts content delivery based on real-time attention tracking.
 """
+import logging
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.models.models import ContentChunk, SessionChunk, LearningSession, User
 
+logger = logging.getLogger("AdaptiveEngine")
 
 class AdaptiveEngine:
     """Engine for adaptive learning adjustments"""
@@ -27,26 +29,20 @@ class AdaptiveEngine:
         chunk_id: int
     ) -> Optional[Dict[str, Any]]:
         """
-        Check if content adjustment is needed based on attention
-        
-        Args:
-            current_score: Current attention score (0-100)
-            average_score: Running average for this chunk
-            chunk_id: Current chunk ID
-        
-        Returns:
-            Adjustment recommendation or None
+        Check if content adjustment is needed based on attention.
         """
         chunk = self.db.query(ContentChunk).filter(
             ContentChunk.id == chunk_id
         ).first()
         
         if not chunk:
+            logger.warning(f"⚠️ Chunk {chunk_id} not found during adaptation check.")
             return None
         
         # Low attention - suggest shorter chunks or break
         if current_score < self.LOW_ATTENTION_THRESHOLD:
             if average_score < self.LOW_ATTENTION_THRESHOLD:
+                logger.info(f"📉 Low attention detected (Curr: {current_score}, Avg: {average_score}). Recommending break.")
                 return {
                     'type': 'break_recommended',
                     'message': 'Your attention seems low. Consider taking a short break.',
@@ -55,6 +51,7 @@ class AdaptiveEngine:
         
         # Sudden attention drop
         if average_score - current_score > self.ATTENTION_DROP_THRESHOLD:
+            logger.info(f"📉 Sudden attention drop detected (Drop: {average_score - current_score}). Recommending quiz.")
             return {
                 'type': 'engagement_drop',
                 'message': 'Noticed a focus drop. Want to try a different learning mode?',
@@ -63,6 +60,7 @@ class AdaptiveEngine:
         
         # High sustained attention - can handle longer chunks
         if current_score > self.HIGH_ATTENTION_THRESHOLD and average_score > self.HIGH_ATTENTION_THRESHOLD:
+            logger.info(f"📈 High attention maintained. Suggesting challenge increase.")
             return {
                 'type': 'increase_challenge',
                 'message': "You're doing great! Ready for more advanced content?",
@@ -78,15 +76,7 @@ class AdaptiveEngine:
         user_id: int
     ) -> Optional[ContentChunk]:
         """
-        Get the next recommended chunk based on user performance
-        
-        Args:
-            session_id: Current session ID
-            current_chunk_id: Current chunk (if any)
-            user_id: User ID
-        
-        Returns:
-            Next recommended chunk or None
+        Get the next recommended chunk based on user performance.
         """
         # Get current chunk info
         if current_chunk_id:
@@ -130,7 +120,7 @@ class AdaptiveEngine:
         quiz_score: Optional[float]
     ) -> ContentChunk:
         """
-        Adjust chunk attributes based on performance
+        Adjust chunk attributes based on performance.
         (Note: This modifies recommendations, not the stored chunk)
         """
         # If struggling (low attention or quiz score), recommend easier approach
@@ -147,8 +137,8 @@ class AdaptiveEngine:
     
     def _recommend_new_chunk(self, user_id: int) -> Optional[ContentChunk]:
         """
-        Recommend a new chunk for user to start
-        Priority: incomplete content > new content > review
+        Recommend a new chunk for user to start.
+        Priority: incomplete content > new content > review.
         """
         # Get user preferences
         user = self.db.query(User).filter(User.id == user_id).first()
@@ -187,14 +177,7 @@ class AdaptiveEngine:
         base_duration: int = 180
     ) -> int:
         """
-        Calculate optimal chunk duration for user based on history
-        
-        Args:
-            user_id: User ID
-            base_duration: Default duration (seconds)
-        
-        Returns:
-            Recommended duration in seconds
+        Calculate optimal chunk duration for user based on history.
         """
         # Get user's average attention across recent sessions
         recent_avg = self.db.query(
@@ -223,14 +206,7 @@ class AdaptiveEngine:
         continuous_minutes: int = 30
     ) -> bool:
         """
-        Determine if a break should be recommended
-        
-        Args:
-            session_id: Current session ID
-            continuous_minutes: Minutes of continuous learning
-        
-        Returns:
-            True if break recommended
+        Determine if a break should be recommended.
         """
         session = self.db.query(LearningSession).filter(
             LearningSession.id == session_id
@@ -255,6 +231,7 @@ class AdaptiveEngine:
                 if recent_attention:
                     avg_recent = sum(recent_attention) / len(recent_attention)
                     if avg_recent < 55:
+                        logger.info(f"🛌 Break recommended due to fatigue (Avg Recent Attn: {avg_recent})")
                         return True
         
         return False

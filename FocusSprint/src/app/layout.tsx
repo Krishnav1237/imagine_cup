@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import ErrorReporter from "@/components/ErrorReporter";
 import { UserProvider } from "@/lib/user-context";
+import { TopLoadingBar } from "@/components/top-loading-bar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,6 +30,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <TopLoadingBar />
         <ErrorReporter />
         <UserProvider>
           {children}

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Zap, Mail, Lock, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { registerUser, loginUser, fetchCurrentUser } from "@/lib/api";
 
 export default function SignUpPage() {
   const router = useRouter();
@@ -15,20 +16,50 @@ export default function SignUpPage() {
     email: "",
     password: "",
   });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Mock sign up - save user data to localStorage
-    localStorage.setItem("focusflow_user", JSON.stringify({
-      name: formData.name,
-      email: formData.email,
-      signedUpAt: new Date().toISOString(),
-    }));
-    localStorage.setItem("focusflow_username", formData.name);
-    
-    // Redirect to onboarding for new users
-    router.push("/splash");
+    setError(null);
+    setLoading(true);
+
+    try {
+      // 1. Create user in backend
+      await registerUser({
+        email: formData.email,
+        password: formData.password,
+        full_name: formData.name,
+      });
+
+      // 2. Immediately log them in to get JWT
+      const auth = await loginUser(formData.email, formData.password);
+      localStorage.setItem("focus_token", auth.access_token);
+
+      // 3. Fetch profile and store basic info locally for UI
+      try {
+        const profile = await fetchCurrentUser(auth.access_token);
+        localStorage.setItem("focusflow_user", JSON.stringify(profile));
+        const username =
+          profile.full_name ||
+          profile.email?.split("@")[0] ||
+          formData.name ||
+          "Learner";
+        localStorage.setItem("focusflow_username", username);
+      } catch {
+        // Non-fatal: still proceed if profile fetch fails
+      }
+
+      // Mark onboarding not yet complete so splash can route correctly
+      localStorage.removeItem("focusflow_onboarded");
+
+      // Redirect to onboarding for new users
+      router.push("/splash");
+    } catch (err: any) {
+      setError(err.message || "Failed to create account");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -59,6 +90,11 @@ export default function SignUpPage() {
           className="glass rounded-3xl p-8"
         >
           <form onSubmit={handleSubmit} className="space-y-5">
+            {error && (
+              <div className="mb-3 text-sm text-red-400 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-2">
+                {error}
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium mb-2">Full Name</label>
               <div className="relative">
@@ -107,9 +143,10 @@ export default function SignUpPage() {
 
             <Button
               type="submit"
-              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold h-12 text-base"
+              disabled={loading}
+              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold h-12 text-base disabled:opacity-60"
             >
-              Create Account
+              {loading ? "Creating account..." : "Create Account"}
             </Button>
           </form>
 

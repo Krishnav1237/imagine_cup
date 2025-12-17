@@ -1,33 +1,32 @@
 """
-PDF processing service
-Extracts text content from PDF documents
+PDF processing service.
+Extracts text content from PDF documents.
 """
 import io
+import logging
 from typing import Optional
 import PyPDF2
 import pdfplumber
 
+logger = logging.getLogger("PDFProcessor")
 
 class PDFProcessor:
     """PDF document processor"""
     
     def extract_text(self, file_data: bytes) -> Optional[str]:
         """
-        Extract text from PDF file
-        
-        Args:
-            file_data: PDF file binary data
-        
-        Returns:
-            Extracted text or None on error
+        Extract text from PDF file.
         """
+        logger.info("📄 Starting PDF text extraction...")
         # Try pdfplumber first (better formatting)
         text = self._extract_with_pdfplumber(file_data)
         
         if not text or len(text.strip()) < 100:
+            logger.info("⚠️ pdfplumber yielded low text count. Falling back to PyPDF2.")
             # Fallback to PyPDF2
             text = self._extract_with_pypdf2(file_data)
         
+        logger.info(f"✅ Extracted {len(text) if text else 0} characters from PDF.")
         return text
     
     def _extract_with_pdfplumber(self, file_data: bytes) -> Optional[str]:
@@ -47,7 +46,7 @@ class PDFProcessor:
             return '\n'.join(all_text)
         
         except Exception as e:
-            print(f"Error extracting with pdfplumber: {e}")
+            logger.error(f"❌ Error extracting with pdfplumber: {e}")
             return None
     
     def _extract_with_pypdf2(self, file_data: bytes) -> Optional[str]:
@@ -67,18 +66,12 @@ class PDFProcessor:
             return '\n'.join(all_text)
         
         except Exception as e:
-            print(f"Error extracting with PyPDF2: {e}")
+            logger.error(f"❌ Error extracting with PyPDF2: {e}")
             return None
     
     def get_metadata(self, file_data: bytes) -> dict:
         """
-        Extract PDF metadata
-        
-        Args:
-            file_data: PDF file binary data
-        
-        Returns:
-            Dictionary with metadata
+        Extract PDF metadata.
         """
         try:
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_data))
@@ -94,5 +87,5 @@ class PDFProcessor:
             }
         
         except Exception as e:
-            print(f"Error extracting metadata: {e}")
+            logger.error(f"❌ Error extracting metadata: {e}")
             return {}

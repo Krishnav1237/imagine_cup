@@ -195,3 +195,8 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
 }
+
+.fs-loading-bar-inner {
+  background: linear-gradient(90deg, var(--primary), var(--coral-light), var(--primary));
+  transition: width 0.3s ease-out;
+}

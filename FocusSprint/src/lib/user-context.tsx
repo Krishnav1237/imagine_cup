@@ -2,39 +2,20 @@
 
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
 
-export interface SprintData {
-  id: string;
-  contentTitle: string;
-  sprintNumber: number;
-  totalSprints: number;
-  duration: number;
-  completed: boolean;
-  infographic: string;
-  summary: string;
-  concept: string;
-  timestamp: number;
-}
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
-export interface InventoryItem {
-  id: string;
-  name: string;
-  type: "avatar" | "pet" | "card" | "badge";
-  rarity: "Common" | "Rare" | "Epic" | "Legendary";
-  imageUrl: string;
-  purchasedAt: number;
-}
+// ... [Keep SprintData, InventoryItem, UserProgress interfaces same as before] ...
 
-export interface UserProgress {
-  currentContentId: string | null;
-  currentSprintIndex: number;
-  sprints: SprintData[];
-  totalSprints: number;
-  contentTitle: string;
-  contentType: "youtube" | "pdf" | "ppt";
-  contentUrl: string;
+// Add UserProfile interface
+interface UserProfile {
+  id: number;
+  email: string;
+  full_name: string;
+  // Add other fields from your backend User schema if needed
 }
 
 interface UserState {
+  user: UserProfile | null;
   focusCoins: number;
   streak: number;
   inventory: InventoryItem[];
@@ -48,11 +29,13 @@ interface UserState {
   setProgress: (progress: UserProgress) => void;
   incrementStreak: () => void;
   resetStreak: () => void;
+  syncWithBackend: () => Promise<void>; // New function
 }
 
 const UserContext = createContext<UserState | undefined>(undefined);
 
 export function UserProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<UserProfile | null>(null);
   const [focusCoins, setFocusCoins] = useState(500);
   const [streak, setStreak] = useState(0);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -60,32 +43,72 @@ export function UserProvider({ children }: { children: ReactNode }) {
   const [currentProgress, setCurrentProgress] = useState<UserProgress | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  useEffect(() => {
-    const saved = localStorage.getItem("focussprint_user");
-    if (saved) {
-      const data = JSON.parse(saved);
-      setFocusCoins(data.focusCoins || 500);
-      setStreak(data.streak || 0);
-      setInventory(data.inventory || []);
-      setCompletedSprints(data.completedSprints || []);
-      setCurrentProgress(data.currentProgress || null);
+  // Sync data from Backend
+  const syncWithBackend = async () => {
+    const token = localStorage.getItem("focus_token");
+    if (!token) return;
+
+    try {
+      // 1. Fetch User Profile
+      const res = await fetch(`${API_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const userData = await res.json();
+        setUser(userData);
+        // If your backend tracks coins/streak, update state here:
+        // setFocusCoins(userData.coins);
+        // setStreak(userData.streak);
+      }
+
+      // 2. Fetch Progress/Analytics (Optional, if you add this endpoint)
+      // const progressRes = await fetch(`${API_URL}/analytics/progress`, ...);
+    } catch (e) {
+      console.error("Sync failed", e);
     }
-    setIsLoaded(true);
+  };
+
+  useEffect(() => {
+    // Initial Load from LocalStorage
+    const saved = localStorage.getItem("focusflow_user");
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (data.focusCoins !== undefined) setFocusCoins(data.focusCoins);
+        if (data.streak !== undefined) setStreak(data.streak);
+        if (data.inventory) setInventory(data.inventory);
+        if (data.completedSprints) setCompletedSprints(data.completedSprints);
+        if (data.currentProgress) setCurrentProgress(data.currentProgress);
+      } catch (e) {
+        console.error("Failed to parse local user data", e);
+      }
+    }
+    
+    // Then try to sync with backend
+    syncWithBackend().finally(() => setIsLoaded(true));
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(
-      "focussprint_user",
-      JSON.stringify({
-        focusCoins,
-        streak,
-        inventory,
-        completedSprints,
-        currentProgress,
-      })
-    );
-  }, [focusCoins, streak, inventory, completedSprints, currentProgress]);
+    if (isLoaded) {
+      const existing = localStorage.getItem("focusflow_user");
+      const baseData = existing ? JSON.parse(existing) : {};
+      
+      localStorage.setItem(
+        "focusflow_user",
+        JSON.stringify({
+          ...baseData,
+          focusCoins,
+          streak,
+          inventory,
+          completedSprints,
+          currentProgress,
+        })
+      );
+    }
+  }, [focusCoins, streak, inventory, completedSprints, currentProgress, isLoaded]);
 
+  // ... [Keep addCoins, spendCoins, etc. implementations] ...
+  
   const addCoins = (amount: number) => {
     setFocusCoins((prev) => prev + amount);
   };
@@ -99,10 +122,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
   };
 
   const purchaseItem = (item: Omit<InventoryItem, "purchasedAt">): boolean => {
-    setInventory((prev) => [
-      ...prev,
-      { ...item, purchasedAt: Date.now() },
-    ]);
+    setInventory((prev) => [...prev, { ...item, purchasedAt: Date.now() }]);
     return true;
   };
 
@@ -125,6 +145,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
   return (
     <UserContext.Provider
       value={{
+        user,
         focusCoins,
         streak,
         inventory,
@@ -138,6 +159,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         setProgress,
         incrementStreak,
         resetStreak,
+        syncWithBackend
       }}
     >
       {children}

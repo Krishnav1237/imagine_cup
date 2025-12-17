@@ -1,25 +1,22 @@
 """
-PowerPoint processing service
-Extracts text content from PPTX presentations
+PowerPoint processing service.
+Extracts text content from PPTX presentations.
 """
 import io
+import logging
 from typing import Optional, List, Dict
 from pptx import Presentation
 
+logger = logging.getLogger("PPTXProcessor")
 
 class PPTXProcessor:
     """PowerPoint presentation processor"""
     
     def extract_text(self, file_data: bytes) -> Optional[str]:
         """
-        Extract text from PowerPoint file
-        
-        Args:
-            file_data: PPTX file binary data
-        
-        Returns:
-            Extracted text or None on error
+        Extract text from PowerPoint file.
         """
+        logger.info("📊 Starting PPTX text extraction...")
         try:
             prs = Presentation(io.BytesIO(file_data))
             all_text = []
@@ -40,10 +37,12 @@ class PPTXProcessor:
                     if notes.strip():
                         all_text.append(f"\n[Speaker Notes: {notes}]\n")
             
-            return '\n'.join(all_text)
+            result = '\n'.join(all_text)
+            logger.info(f"✅ Extracted {len(result)} characters from PPTX.")
+            return result
         
         except Exception as e:
-            print(f"Error extracting from PowerPoint: {e}")
+            logger.error(f"❌ Error extracting from PowerPoint: {e}")
             return None
     
     def _extract_slide_text(self, slide) -> str:
@@ -85,30 +84,18 @@ class PPTXProcessor:
     
     def get_slide_count(self, file_data: bytes) -> int:
         """
-        Get number of slides in presentation
-        
-        Args:
-            file_data: PPTX file binary data
-        
-        Returns:
-            Number of slides
+        Get number of slides in presentation.
         """
         try:
             prs = Presentation(io.BytesIO(file_data))
             return len(prs.slides)
         except Exception as e:
-            print(f"Error counting slides: {e}")
+            logger.error(f"❌ Error counting slides: {e}")
             return 0
     
     def get_structured_content(self, file_data: bytes) -> List[Dict[str, str]]:
         """
-        Extract content in structured format
-        
-        Args:
-            file_data: PPTX file binary data
-        
-        Returns:
-            List of dictionaries with slide content
+        Extract content in structured format.
         """
         try:
             prs = Presentation(io.BytesIO(file_data))
@@ -144,5 +131,5 @@ class PPTXProcessor:
             return slides
         
         except Exception as e:
-            print(f"Error extracting structured content: {e}")
+            logger.error(f"❌ Error extracting structured content: {e}")
             return []

@@ -1,29 +1,31 @@
 """
-Content management API routes
-Handles content upload, processing, and retrieval
+Content management API routes.
+Handles content upload, retrieval, and sprint completion tracking.
 """
+import logging
+import os
+import shutil
+from typing import List, Optional
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
-from typing import List, Optional
-import uuid
-from datetime import datetime
 
 from app.core.database import get_db
 from app.core.auth import get_current_active_user
-from app.models.models import User, ContentItem, ContentChunk
+from app.models.models import User, ContentItem, ContentChunk, LearningSession, SessionChunk
 from app.schemas.schemas import (
-    ContentUpload,
     ContentItem as ContentItemSchema,
     ContentItemDetail,
-    ContentChunk as ContentChunkSchema,
     ContentStatus,
-    ContentSourceType
+    ContentSourceType,
+    ChunkCompletion
 )
-from app.services.storage.adapter import get_storage_adapter
-from app.services.content_processor import ContentProcessor
+from app.config import settings
+from app.services.content_processor import processor
 
+logger = logging.getLogger("ContentAPI")
 router = APIRouter()
-
 
 @router.post("/upload", response_model=ContentItemSchema, status_code=status.HTTP_201_CREATED)
 async def upload_content(
@@ -36,61 +38,62 @@ async def upload_content(
     db: Session = Depends(get_db)
 ):
     """
-    Upload new content (YouTube, PDF, or PowerPoint)
+    Upload new content (YouTube, PDF, or PowerPoint).
     """
-    # Validate source type
-    try:
-        source_type_enum = ContentSourceType(source_type)
-    except ValueError:
-        raise HTTPException(
+    logger.info(f"📤 Upload request from {current_user.email} for type={source_type}")
+    
+    # 1. Validate Input
+    if source_type not in [e.value for e in ContentSourceType]:
+         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid source type. Must be one of: {', '.join([e.value for e in ContentSourceType])}"
         )
     
-    # Validate input based on source type
-    if source_type_enum == ContentSourceType.YOUTUBE:
-        if not source_url:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="source_url is required for YouTube content"
-            )
-    else:
-        if not file:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file is required for PDF and PPTX content"
-            )
+    if source_type == ContentSourceType.YOUTUBE.value and not source_url:
+        raise HTTPException(status_code=400, detail="source_url is required for YouTube content")
     
-    # Create content item
-    content_item = ContentItem(
-        user_id=current_user.id,
-        title=title or f"Untitled {source_type_enum.value}",
-        source_type=source_type_enum.value,
-        source_url=source_url,
-        status=ContentStatus.PENDING.value
-    )
-    
-    db.add(content_item)
-    db.commit()
-    db.refresh(content_item)
-    
-    # Handle file upload if present
-    if file:
-        storage = get_storage_adapter()
-        file_extension = file.filename.split('.')[-1] if file.filename else source_type_enum.value
-        file_path = f"content/{current_user.id}/{content_item.id}/original.{file_extension}"
-        
-        await storage.save_uploaded_file(file, file_path)
-        content_item.file_path = file_path
-        db.commit()
-        db.refresh(content_item)
-    
-    # Process content in background
-    processor = ContentProcessor(db)
-    background_tasks.add_task(processor.process_content, content_item.id)
-    
-    return content_item
+    if source_type in [ContentSourceType.PDF.value, ContentSourceType.PPTX.value] and not file:
+        raise HTTPException(status_code=400, detail="file is required for PDF/PPTX content")
 
+    # 2. Create DB Entry
+    new_content = ContentItem(
+        user_id=current_user.id,
+        title=title or f"Untitled {source_type}",
+        source_type=source_type,
+        source_url=source_url,
+        status=ContentStatus.PENDING.value,
+        created_at=datetime.utcnow()
+    )
+    db.add(new_content)
+    db.commit()
+    db.refresh(new_content)
+
+    # 3. Save File Locally (if provided)
+    if file:
+        # Create directory: uploads/user_id/content_id/
+        save_dir = f"{settings.UPLOAD_DIR}/{current_user.id}/{new_content.id}"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Save file
+        file_ext = file.filename.split(".")[-1] if file.filename else source_type
+        file_path = f"{save_dir}/original.{file_ext}"
+        
+        try:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            new_content.file_path = file_path
+            db.commit()
+        except Exception as e:
+            logger.error(f"❌ Failed to save file: {e}")
+            db.delete(new_content)
+            db.commit()
+            raise HTTPException(500, f"Failed to save file: {str(e)}")
+
+    # 4. Trigger Background Processing
+    background_tasks.add_task(processor.process_content_task, new_content.id)
+    logger.info(f"✅ Content {new_content.id} queued for processing")
+
+    return new_content
 
 @router.get("/", response_model=List[ContentItemSchema])
 async def list_content(
@@ -101,16 +104,12 @@ async def list_content(
     db: Session = Depends(get_db)
 ):
     """
-    List all content items for the current user
+    List all content items for the current user.
     """
     query = db.query(ContentItem).filter(ContentItem.user_id == current_user.id)
-    
     if status:
         query = query.filter(ContentItem.status == status)
-    
-    content_items = query.offset(skip).limit(limit).all()
-    return content_items
-
+    return query.offset(skip).limit(limit).all()
 
 @router.get("/{content_id}", response_model=ContentItemDetail)
 async def get_content(
@@ -119,7 +118,7 @@ async def get_content(
     db: Session = Depends(get_db)
 ):
     """
-    Get detailed information about a specific content item
+    Get detailed information about a specific content item + chunks.
     """
     content_item = db.query(ContentItem).filter(
         ContentItem.id == content_id,
@@ -127,89 +126,18 @@ async def get_content(
     ).first()
     
     if not content_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Content not found"
-        )
+        raise HTTPException(status_code=404, detail="Content not found")
     
-    # Get chunks
+    # Explicitly fetch chunks
     chunks = db.query(ContentChunk).filter(
         ContentChunk.content_item_id == content_id
     ).order_by(ContentChunk.sequence_number).all()
     
-    # Build response
-    response = ContentItemDetail(
+    return {
         **content_item.__dict__,
-        chunk_count=len(chunks),
-        chunks=chunks
-    )
-    
-    return response
-
-
-@router.get("/{content_id}/chunks", response_model=List[ContentChunkSchema])
-async def get_content_chunks(
-    content_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Get all chunks for a specific content item
-    """
-    # Verify content belongs to user
-    content_item = db.query(ContentItem).filter(
-        ContentItem.id == content_id,
-        ContentItem.user_id == current_user.id
-    ).first()
-    
-    if not content_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Content not found"
-        )
-    
-    chunks = db.query(ContentChunk).filter(
-        ContentChunk.content_item_id == content_id
-    ).order_by(ContentChunk.sequence_number).all()
-    
-    return chunks
-
-
-@router.get("/{content_id}/chunks/{chunk_id}", response_model=ContentChunkSchema)
-async def get_chunk(
-    content_id: int,
-    chunk_id: int,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Get a specific chunk
-    """
-    # Verify content belongs to user
-    content_item = db.query(ContentItem).filter(
-        ContentItem.id == content_id,
-        ContentItem.user_id == current_user.id
-    ).first()
-    
-    if not content_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Content not found"
-        )
-    
-    chunk = db.query(ContentChunk).filter(
-        ContentChunk.id == chunk_id,
-        ContentChunk.content_item_id == content_id
-    ).first()
-    
-    if not chunk:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Chunk not found"
-        )
-    
-    return chunk
-
+        "chunks": chunks,
+        "chunk_count": len(chunks)
+    }
 
 @router.delete("/{content_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_content(
@@ -218,7 +146,7 @@ async def delete_content(
     db: Session = Depends(get_db)
 ):
     """
-    Delete a content item and all its chunks
+    Delete a content item.
     """
     content_item = db.query(ContentItem).filter(
         ContentItem.id == content_id,
@@ -226,61 +154,88 @@ async def delete_content(
     ).first()
     
     if not content_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Content not found"
-        )
+        raise HTTPException(status_code=404, detail="Content not found")
     
-    # Delete files from storage
-    if content_item.file_path:
-        storage = get_storage_adapter()
-        try:
-            await storage.delete_file(content_item.file_path)
-        except Exception as e:
-            print(f"Error deleting file: {e}")
-    
-    # Delete from database (cascades to chunks)
     db.delete(content_item)
     db.commit()
-    
+    logger.info(f"🗑️ Content {content_id} deleted by user {current_user.id}")
     return None
 
-
-@router.post("/{content_id}/reprocess", response_model=ContentItemSchema)
-async def reprocess_content(
+@router.post("/{content_id}/chunks/{chunk_id}/complete")
+async def complete_chunk(
     content_id: int,
-    background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    chunk_id: int,
+    completion_data: ChunkCompletion,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
-    Reprocess content (re-generate chunks)
+    Mark a sprint (chunk) as completed and track progress using real data.
     """
-    content_item = db.query(ContentItem).filter(
-        ContentItem.id == content_id,
+    logger.info(f"🏁 Completing chunk {chunk_id} for content {content_id}")
+
+    # 1. Verify Ownership
+    content = db.query(ContentItem).filter(
+        ContentItem.id == content_id, 
         ContentItem.user_id == current_user.id
     ).first()
     
-    if not content_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Content not found"
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+
+    # 2. Find or Create Learning Session
+    # We group sprints into a "Session" for analytics
+    session_name = f"Session for {content.title}"
+    session = db.query(LearningSession).filter(
+        LearningSession.user_id == current_user.id, 
+        LearningSession.session_name == session_name
+    ).first()
+
+    if not session:
+        session = LearningSession(
+            user_id=current_user.id,
+            session_name=session_name,
+            started_at=datetime.utcnow(),
+            total_chunks_viewed=0,
+            total_duration_seconds=0
         )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
+    # 3. Check for existing completion (prevent double counting)
+    existing = db.query(SessionChunk).filter(
+        SessionChunk.session_id == session.id,
+        SessionChunk.chunk_id == chunk_id
+    ).first()
     
-    # Reset status
-    content_item.status = ContentStatus.PENDING.value
-    content_item.error_message = None
+    if existing:
+        logger.info(f"ℹ️ Chunk {chunk_id} already completed.")
+        return {"status": "already_completed", "coins_earned": 0}
+
+    # 4. Record Completion
+    session_chunk = SessionChunk(
+        session_id=session.id,
+        chunk_id=chunk_id,
+        started_at=datetime.utcnow() - timedelta(seconds=completion_data.time_spent_seconds), 
+        completed_at=datetime.utcnow(),
+        is_completed=True,
+        quiz_score=completion_data.quiz_score,
+        average_attention=completion_data.average_attention
+    )
+    db.add(session_chunk)
     
-    # Delete existing chunks
-    db.query(ContentChunk).filter(
-        ContentChunk.content_item_id == content_id
-    ).delete()
+    # 5. Update Session Stats
+    session.total_chunks_viewed += 1
+    session.total_duration_seconds += completion_data.time_spent_seconds
+    
+    # 6. Calculate Coins (e.g. 10 base + bonus for good quiz score)
+    coins_earned = 10 + int(completion_data.quiz_score / 10)
     
     db.commit()
-    db.refresh(content_item)
+    logger.info(f"✅ Chunk {chunk_id} complete. Score: {completion_data.quiz_score}, Attn: {completion_data.average_attention}")
     
-    # Reprocess in background
-    processor = ContentProcessor(db)
-    background_tasks.add_task(processor.process_content, content_item.id)
-    
-    return content_item
+    return {
+        "status": "success", 
+        "coins_earned": coins_earned
+    }

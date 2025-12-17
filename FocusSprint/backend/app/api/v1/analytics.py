@@ -1,7 +1,8 @@
 """
-Analytics API routes
-Provides insights into user progress and content performance
+Analytics API routes.
+Provides insights into user progress and content performance.
 """
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -13,8 +14,8 @@ from app.core.auth import get_current_active_user
 from app.models.models import User, ContentItem, ContentChunk, LearningSession, SessionChunk
 from app.schemas.schemas import UserProgress, ContentAnalytics
 
+logger = logging.getLogger("AnalyticsAPI")
 router = APIRouter()
-
 
 @router.get("/progress", response_model=UserProgress)
 async def get_user_progress(
@@ -22,8 +23,10 @@ async def get_user_progress(
     db: Session = Depends(get_db)
 ):
     """
-    Get overall progress statistics for the current user
+    Get overall progress statistics for the current user.
     """
+    logger.debug(f"📊 Fetching progress for {current_user.email}")
+    
     # Total content items
     total_content = db.query(func.count(ContentItem.id)).filter(
         ContentItem.user_id == current_user.id
@@ -80,7 +83,6 @@ async def get_user_progress(
         streak_days=streak_days
     )
 
-
 @router.get("/content/{content_id}", response_model=ContentAnalytics)
 async def get_content_analytics(
     content_id: int,
@@ -88,7 +90,7 @@ async def get_content_analytics(
     db: Session = Depends(get_db)
 ):
     """
-    Get analytics for a specific content item
+    Get analytics for a specific content item.
     """
     # Verify content belongs to user
     content = db.query(ContentItem).filter(
@@ -155,14 +157,13 @@ async def get_content_analytics(
         average_attention=round(avg_attention, 2)
     )
 
-
 @router.get("/overview")
 async def get_overview(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
-    Get comprehensive overview of user's learning analytics
+    Get comprehensive overview of user's learning analytics.
     """
     # Recent sessions (last 7 days)
     seven_days_ago = datetime.utcnow() - timedelta(days=7)
@@ -235,7 +236,6 @@ async def get_overview(
         'attention_trends': attention_over_time
     }
 
-
 @router.get("/session/{session_id}/details")
 async def get_session_analytics(
     session_id: int,
@@ -243,7 +243,7 @@ async def get_session_analytics(
     db: Session = Depends(get_db)
 ):
     """
-    Get detailed analytics for a specific session
+    Get detailed analytics for a specific session.
     """
     session = db.query(LearningSession).filter(
         LearningSession.id == session_id,
@@ -274,8 +274,7 @@ async def get_session_analytics(
                 'completed': sc.is_completed,
                 'average_attention': sc.average_attention,
                 'quiz_score': sc.quiz_score,
-                'time_spent': (sc.completed_at - sc.started_at).total_seconds() if sc.completed_at else None,
-                'attention_data': sc.attention_scores
+                'time_spent': (sc.completed_at - sc.started_at).total_seconds() if sc.completed_at else None
             })
     
     return {
@@ -290,10 +289,9 @@ async def get_session_analytics(
         'chunks': chunk_details
     }
 
-
 def calculate_streak(user_id: int, db: Session) -> int:
     """
-    Calculate the user's current learning streak in days
+    Calculate the user's current learning streak in days.
     """
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     streak = 0

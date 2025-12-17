@@ -3,66 +3,112 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Youtube, FileText, Presentation, Loader2, Sparkles, ChevronRight } from "lucide-react";
+import { Youtube, FileText, Presentation, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AppNav } from "@/components/app-nav";
-import { useUser } from "@/lib/user-context";
-import { UserProgress, SprintData } from "@/lib/user-context";
+
+// Use environment variable for API URL
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 export default function UploadPage() {
   const router = useRouter();
-  const { setProgress } = useUser();
   const [activeTab, setActiveTab] = useState<"youtube" | "pdf" | "ppt">("youtube");
   const [input, setInput] = useState("");
-  const [processing, setProcessing] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
+  const [statusMessage, setStatusMessage] = useState("");
+
+  // Poll the backend until status is 'completed' or 'failed'
+  const pollStatus = async (contentId: number, token: string) => {
+    const maxRetries = 60; // ~2 minutes timeout
+    let retries = 0;
+
+    const interval = setInterval(async () => {
+      retries++;
+      try {
+        const res = await fetch(`${API_URL}/content/${contentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        
+        if (!res.ok) throw new Error("Failed to check status");
+        
+        const data = await res.json();
+        
+        if (data.status === "completed") {
+          clearInterval(interval);
+          setStatusMessage("Ready! Redirecting...");
+          router.push(`/sprint?id=${contentId}`);
+        } else if (data.status === "failed") {
+          clearInterval(interval);
+          setProcessing(false);
+          setError(data.error_message || "Processing failed. Please try again.");
+        } else {
+          // Update status message based on backend state (pending, processing)
+          setStatusMessage(`Analyzing content... (${data.status})`);
+        }
+
+        if (retries >= maxRetries) {
+          clearInterval(interval);
+          setProcessing(false);
+          setError("Processing timed out. Please check 'My Content' later.");
+        }
+      } catch (err) {
+        console.error(err);
+        // Don't stop polling on transient network errors, but you could add logic here
+      }
+    }, 2000);
+  };
 
   const handleProcess = async () => {
     if (!input && !file) return;
-
     setProcessing(true);
+    setError("");
+    setStatusMessage("Uploading...");
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const token = localStorage.getItem("focus_token");
+      if (!token) {
+        router.push("/signin");
+        return;
+      }
 
-    const mockSprints: SprintData[] = Array.from({ length: 12 }, (_, i) => ({
-      id: `sprint-${i + 1}`,
-      contentTitle: activeTab === "youtube" ? "Introduction to Python Programming" : file?.name || "Uploaded Content",
-      sprintNumber: i + 1,
-      totalSprints: 12,
-      duration: 300,
-      completed: false,
-      infographic: `https://images.unsplash.com/photo-${1550000000000 + i * 1000000}?w=800&h=1200&fit=crop`,
-      summary: `Sprint ${i + 1} covers key concepts and practical applications. This segment focuses on fundamental principles and hands-on examples.`,
-      concept: [
-        "Variables & Data Types",
-        "Control Flow",
-        "Functions",
-        "Lists & Dictionaries",
-        "Loops",
-        "String Operations",
-        "File Handling",
-        "Error Handling",
-        "Modules",
-        "Object-Oriented Programming",
-        "Advanced Concepts",
-        "Final Review",
-      ][i],
-      timestamp: Date.now(),
-    }));
+      const formData = new FormData();
+      // Map frontend tabs to backend enums
+      let type = "youtube";
+      if (activeTab === "pdf") type = "pdf";
+      if (activeTab === "ppt") type = "pptx";
 
-    const progress: UserProgress = {
-      currentContentId: `content-${Date.now()}`,
-      currentSprintIndex: 0,
-      sprints: mockSprints,
-      totalSprints: 12,
-      contentTitle: activeTab === "youtube" ? "Introduction to Python Programming" : file?.name || "Uploaded Content",
-      contentType: activeTab,
-      contentUrl: activeTab === "youtube" ? input : file?.name || "",
-    };
+      formData.append("source_type", type);
+      
+      if (activeTab === "youtube") {
+        formData.append("source_url", input);
+      } else if (file) {
+        formData.append("file", file);
+      }
 
-    setProgress(progress);
-    setProcessing(false);
-    router.push("/sprint");
+      // 1. Upload
+      const res = await fetch(`${API_URL}/content/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Upload failed");
+      }
+
+      const data = await res.json();
+      
+      // 2. Start Polling
+      setStatusMessage("Queued for processing...");
+      pollStatus(data.id, token);
+
+    } catch (err: any) {
+      setError(err.message);
+      setProcessing(false);
+    }
   };
 
   const tabs = [
@@ -74,162 +120,92 @@ export default function UploadPage() {
   return (
     <div className="min-h-screen bg-[#0a0a12] text-white">
       <AppNav />
-      
       <div className="pt-32 pb-20 px-6">
         <div className="max-w-4xl mx-auto">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="text-center mb-12"
-          >
-            <div className="inline-flex items-center gap-2 glass px-4 py-2 rounded-full mb-6">
-              <Sparkles className="w-4 h-4 text-[#f59e0b]" />
-              <span className="text-sm text-[#8888a0]">AI-Powered Content Metabolizer</span>
-            </div>
-            <h1 className="text-5xl md:text-6xl font-bold mb-4">
-              Transform Content Into <span className="gradient-text">Sprints</span>
-            </h1>
-            <p className="text-xl text-[#8888a0] max-w-2xl mx-auto">
-              Upload any learning material. Our AI will break it down into focused 5-minute sprints.
-            </p>
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center mb-12">
+            <h1 className="text-5xl font-bold mb-4">Transform Content Into <span className="text-[#ff6b4a]">Sprints</span></h1>
+            <p className="text-[#8888a0]">Upload material to generate AI-powered learning chunks.</p>
           </motion.div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.2 }}
-            className="glass rounded-3xl p-8"
-          >
+          <motion.div className="glass rounded-3xl p-8 bg-[#13131f] border border-[#2a2a3e]">
+            {error && (
+              <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm">
+                {error}
+              </div>
+            )}
+
+            {/* Tabs */}
             <div className="flex gap-2 mb-8">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => {
-                    setActiveTab(tab.id);
-                    setInput("");
-                    setFile(null);
-                  }}
-                  className={`flex-1 flex items-center justify-center gap-2 px-6 py-4 rounded-xl transition-all ${
-                    activeTab === tab.id
-                      ? "bg-[#1e1e2e] border border-white/20"
-                      : "bg-transparent border border-[#2a2a3e] hover:border-white/10"
+                  onClick={() => { setActiveTab(tab.id); setInput(""); setFile(null); }}
+                  className={`flex-1 flex items-center justify-center gap-2 px-6 py-4 rounded-xl border transition-all ${
+                    activeTab === tab.id 
+                      ? "bg-[#1e1e2e] border-white/20 text-white" 
+                      : "border-transparent hover:bg-[#1e1e2e] text-[#8888a0]"
                   }`}
                 >
-                  <tab.icon className="w-5 h-5" style={{ color: activeTab === tab.id ? tab.color : "#8888a0" }} />
-                  <span className={activeTab === tab.id ? "text-white" : "text-[#8888a0]"}>{tab.label}</span>
+                  <tab.icon className="w-5 h-5" style={{ color: tab.color }} />
+                  <span>{tab.label}</span>
                 </button>
               ))}
             </div>
 
-            {activeTab === "youtube" ? (
-              <div className="space-y-4">
-                <label className="block text-sm text-[#8888a0] mb-2">YouTube URL</label>
-                <input
-                  type="text"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  className="w-full px-6 py-4 rounded-xl bg-[#1e1e2e] border border-[#2a2a3e] text-white placeholder:text-[#8888a0] focus:outline-none focus:border-[#ff6b4a] transition-colors"
-                />
-                <p className="text-sm text-[#8888a0]">
-                  Paste any YouTube video URL. The AI will transcribe and analyze the content.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <label className="block text-sm text-[#8888a0] mb-2">
-                  Upload {activeTab === "pdf" ? "PDF" : "PowerPoint"} File
-                </label>
-                <div
-                  className="border-2 border-dashed border-[#2a2a3e] rounded-xl p-12 text-center hover:border-white/20 transition-colors cursor-pointer"
+            {/* Input Area */}
+            <div className="min-h-[200px] flex flex-col justify-center">
+              {activeTab === "youtube" ? (
+                <div className="space-y-4">
+                  <input
+                    type="text"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=..."
+                    className="w-full px-6 py-4 rounded-xl bg-[#0a0a12] border border-[#2a2a3e] text-white focus:border-[#ff6b4a] outline-none"
+                  />
+                  <p className="text-sm text-[#8888a0]">Our AI will transcribe and analyze the video.</p>
+                </div>
+              ) : (
+                <div 
                   onClick={() => document.getElementById("file-input")?.click()}
+                  className="border-2 border-dashed border-[#2a2a3e] rounded-xl p-12 text-center cursor-pointer hover:border-[#ff6b4a]/50 transition-colors"
                 >
                   {file ? (
                     <div className="flex items-center justify-center gap-3">
                       <FileText className="w-8 h-8 text-[#7c3aed]" />
                       <div className="text-left">
-                        <p className="font-medium">{file.name}</p>
+                        <p className="font-medium text-white">{file.name}</p>
                         <p className="text-sm text-[#8888a0]">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
                       </div>
                     </div>
                   ) : (
                     <div>
-                      <div className="w-16 h-16 rounded-2xl bg-[#1e1e2e] flex items-center justify-center mx-auto mb-4">
-                        {activeTab === "pdf" ? (
-                          <FileText className="w-8 h-8 text-[#7c3aed]" />
-                        ) : (
-                          <Presentation className="w-8 h-8 text-[#06b6d4]" />
-                        )}
-                      </div>
-                      <p className="text-white mb-2">Click to upload or drag and drop</p>
-                      <p className="text-sm text-[#8888a0]">
-                        {activeTab === "pdf" ? "PDF files up to 50MB" : "PPT/PPTX files up to 50MB"}
-                      </p>
+                      <p className="text-white mb-2">Click to upload {activeTab.toUpperCase()}</p>
+                      <p className="text-sm text-[#8888a0]">Max size 50MB</p>
                     </div>
                   )}
+                  <input 
+                    id="file-input" 
+                    type="file" 
+                    accept={activeTab === "pdf" ? ".pdf" : ".ppt,.pptx"}
+                    className="hidden" 
+                    onChange={(e) => setFile(e.target.files?.[0] || null)} 
+                  />
                 </div>
-                <input
-                  id="file-input"
-                  type="file"
-                  accept={activeTab === "pdf" ? ".pdf" : ".ppt,.pptx"}
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  className="hidden"
-                />
-              </div>
-            )}
-
-            <div className="mt-8 p-6 rounded-xl bg-gradient-to-br from-[#ff6b4a]/10 to-[#7c3aed]/10 border border-[#ff6b4a]/20">
-              <h3 className="font-semibold mb-3 flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-[#f59e0b]" />
-                What happens next?
-              </h3>
-              <ul className="space-y-2 text-sm text-[#8888a0]">
-                <li className="flex items-start gap-2">
-                  <ChevronRight className="w-4 h-4 text-[#ff6b4a] mt-0.5 flex-shrink-0" />
-                  <span>AI analyzes your content and identifies key concepts</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <ChevronRight className="w-4 h-4 text-[#ff6b4a] mt-0.5 flex-shrink-0" />
-                  <span>Content is broken into 5-minute micro-sprints</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <ChevronRight className="w-4 h-4 text-[#ff6b4a] mt-0.5 flex-shrink-0" />
-                  <span>Each sprint ends with a visual summary and quiz</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <ChevronRight className="w-4 h-4 text-[#ff6b4a] mt-0.5 flex-shrink-0" />
-                  <span>Earn Focus Coins for completing sprints with good focus</span>
-                </li>
-              </ul>
+              )}
             </div>
 
             <Button
               onClick={handleProcess}
               disabled={processing || (!input && !file)}
-              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold px-8 py-6 text-lg rounded-xl mt-8 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold px-8 py-6 text-lg rounded-xl mt-8 disabled:opacity-50"
             >
               {processing ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                  Processing Content...
-                </>
+                <><Loader2 className="animate-spin mr-2"/> {statusMessage || "Processing Content..."}</>
               ) : (
-                <>
-                  Start Sprint Session
-                  <ChevronRight className="w-5 h-5 ml-2" />
-                </>
+                <><Sparkles className="mr-2 w-5 h-5"/> Start Sprint Session</>
               )}
             </Button>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.6, delay: 0.4 }}
-            className="mt-8 text-center text-sm text-[#8888a0]"
-          >
-            <p>Your content is processed locally and securely. We respect your privacy.</p>
           </motion.div>
         </div>
       </div>

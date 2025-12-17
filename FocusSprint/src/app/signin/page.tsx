@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Zap, Mail, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { loginUser, fetchCurrentUser } from "@/lib/api";
 
 export default function SignInPage() {
   const router = useRouter();
@@ -14,34 +15,50 @@ export default function SignInPage() {
     email: "",
     password: "",
   });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Mock sign in - check if user exists
-    const existingUser = localStorage.getItem("focusflow_user");
-    
-    if (existingUser) {
-      const userData = JSON.parse(existingUser);
-      localStorage.setItem("focusflow_username", userData.name);
-      
-      // Redirect to dashboard for existing users
-      router.push("/dashboard");
-    } else {
-      // For demo, allow any sign in and redirect to dashboard
-      localStorage.setItem("focusflow_user", JSON.stringify({
-        email: formData.email,
-        signedInAt: new Date().toISOString(),
-      }));
-      localStorage.setItem("focusflow_onboarded", "true");
-      router.push("/dashboard");
+    setError(null);
+    setLoading(true);
+
+    try {
+      // 1. Login against backend to get JWT
+      const auth = await loginUser(formData.email, formData.password);
+      localStorage.setItem("focus_token", auth.access_token);
+
+      // 2. Fetch user profile and cache it for UI
+      try {
+        const profile = await fetchCurrentUser(auth.access_token);
+        localStorage.setItem("focusflow_user", JSON.stringify(profile));
+        const username =
+          profile.full_name ||
+          profile.email?.split("@")[0] ||
+          formData.email.split("@")[0] ||
+          "Learner";
+        localStorage.setItem("focusflow_username", username);
+      } catch {
+        // Non-fatal; continue even if profile fails
+      }
+
+      // If they haven't gone through onboarding on this device, send them there
+      const hasOnboarded = localStorage.getItem("focusflow_onboarded");
+      if (hasOnboarded) {
+        router.push("/dashboard");
+      } else {
+        router.push("/splash");
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to sign in");
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <div className="min-h-screen bg-[#0a0a12] text-white flex items-center justify-center px-6">
       <div className="w-full max-w-md">
-        {/* Logo */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -58,7 +75,6 @@ export default function SignInPage() {
           <p className="text-[#8888a0]">Sign in to continue your learning journey</p>
         </motion.div>
 
-        {/* Sign In Form */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -66,6 +82,11 @@ export default function SignInPage() {
           className="glass rounded-3xl p-8"
         >
           <form onSubmit={handleSubmit} className="space-y-5">
+            {error && (
+              <div className="mb-3 text-sm text-red-400 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-2">
+                {error}
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium mb-2">Email</label>
               <div className="relative">
@@ -103,9 +124,10 @@ export default function SignInPage() {
 
             <Button
               type="submit"
-              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold h-12 text-base"
+              disabled={loading}
+              className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold h-12 text-base disabled:opacity-60"
             >
-              Sign In
+              {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
 

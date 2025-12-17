@@ -34,6 +34,22 @@ export default function OnboardingPage() {
     router.push("/dashboard");
   };
 
+  const requestCameraPermission = async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      // Immediately stop tracks – we only needed the permission prompt for now.
+      stream.getTracks().forEach((track) => track.stop());
+      localStorage.setItem("focusflow_camera_permission", "granted");
+    } catch (e) {
+      console.error("Camera permission denied or failed", e);
+      localStorage.setItem("focusflow_camera_permission", "denied");
+    }
+  };
+
   const steps: Record<OnboardingStep, React.ReactElement> = {
     welcome: (
       <motion.div
@@ -109,6 +125,7 @@ export default function OnboardingPage() {
           <Button
             onClick={() => {
               setCameraEnabled(true);
+              requestCameraPermission();
               setStep("style");
             }}
             className="flex-1 bg-[#7c3aed] hover:bg-[#8b5cf6] text-white font-semibold px-8 py-6 text-lg rounded-xl"

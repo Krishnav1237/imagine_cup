@@ -1,14 +1,16 @@
 """
-Transcription service interface and implementations
-Supports both Whisper (local) and Azure Speech Services
+Transcription service interface and implementations.
+Supports both Whisper (local) and Azure Speech Services.
 """
+import logging
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Optional
 from pathlib import Path
-import asyncio
 
 from app.config import settings
 
+logger = logging.getLogger("Transcriber")
 
 class Transcriber(ABC):
     """Abstract transcriber interface"""
@@ -16,16 +18,9 @@ class Transcriber(ABC):
     @abstractmethod
     async def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """
-        Transcribe audio file to text
-        
-        Args:
-            audio_path: Path to audio file
-        
-        Returns:
-            Transcribed text or None on error
+        Transcribe audio file to text.
         """
         pass
-
 
 class WhisperTranscriber(Transcriber):
     """OpenAI Whisper transcriber (local)"""
@@ -35,20 +30,20 @@ class WhisperTranscriber(Transcriber):
         self._load_model()
     
     def _load_model(self):
-        """Lazy load Whisper model"""
+        """Lazy load Whisper model."""
         try:
             import whisper
             # Use 'base' model for balance of speed and accuracy
-            # Options: tiny, base, small, medium, large
+            logger.info("⏳ Loading Whisper model 'base'...")
             self.model = whisper.load_model("base")
-            print("✅ Whisper model loaded")
+            logger.info("✅ Whisper model loaded successfully")
         except Exception as e:
-            print(f"⚠️ Warning: Could not load Whisper model: {e}")
+            logger.error(f"⚠️ Warning: Could not load Whisper model: {e}")
     
     async def transcribe_audio(self, audio_path: str) -> Optional[str]:
         """Transcribe audio using Whisper"""
         if not self.model:
-            print("Whisper model not loaded")
+            logger.error("Whisper model not loaded")
             return None
         
         try:
@@ -60,7 +55,7 @@ class WhisperTranscriber(Transcriber):
             if settings.is_local:
                 full_path = Path(settings.UPLOAD_DIR) / audio_path
                 if not full_path.exists():
-                    print(f"Audio file not found: {full_path}")
+                    logger.error(f"Audio file not found: {full_path}")
                     return None
                 
                 audio_file = str(full_path)
@@ -74,6 +69,8 @@ class WhisperTranscriber(Transcriber):
                 
                 audio_file = str(temp_path)
             
+            logger.info(f"🎙️ Starting local transcription for {audio_file}")
+            
             # Run transcription in executor (CPU intensive)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -86,16 +83,16 @@ class WhisperTranscriber(Transcriber):
             if not settings.is_local and Path(audio_file).exists():
                 Path(audio_file).unlink()
             
+            logger.info("✅ Transcription complete")
             return result.get('text') if result else None
         
         except Exception as e:
-            print(f"Error transcribing with Whisper: {e}")
+            logger.error(f"❌ Error transcribing with Whisper: {e}")
             return None
     
     def _transcribe_sync(self, audio_file: str) -> dict:
         """Synchronous transcription"""
         return self.model.transcribe(audio_file)
-
 
 class AzureSpeechTranscriber(Transcriber):
     """Azure Speech Services transcriber"""
@@ -112,7 +109,7 @@ class AzureSpeechTranscriber(Transcriber):
                 region=settings.AZURE_SPEECH_REGION
             )
             self.speech_config.speech_recognition_language = "en-US"
-            print("✅ Azure Speech Services configured")
+            logger.info("✅ Azure Speech Services configured")
         except ImportError:
             raise ImportError("Azure Speech SDK not installed")
     
@@ -147,6 +144,8 @@ class AzureSpeechTranscriber(Transcriber):
                 audio_config=audio_config
             )
             
+            logger.info(f"🎙️ Starting Azure transcription for {audio_file}")
+            
             # Perform recognition
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -162,7 +161,7 @@ class AzureSpeechTranscriber(Transcriber):
             return result
         
         except Exception as e:
-            print(f"Error transcribing with Azure Speech: {e}")
+            logger.error(f"❌ Error transcribing with Azure Speech: {e}")
             return None
     
     def _recognize_sync(self, recognizer) -> Optional[str]:
@@ -195,11 +194,9 @@ class AzureSpeechTranscriber(Transcriber):
         
         return ' '.join(all_text) if all_text else None
 
-
 def get_transcriber() -> Transcriber:
     """
-    Factory function to get appropriate transcriber
-    based on deployment mode
+    Factory function to get appropriate transcriber based on deployment mode.
     """
     if settings.is_local:
         return WhisperTranscriber()
@@ -207,5 +204,4 @@ def get_transcriber() -> Transcriber:
         if settings.AZURE_SPEECH_KEY:
             return AzureSpeechTranscriber()
         else:
-            # Fallback to Whisper even in Azure if credentials not set
             return WhisperTranscriber()
