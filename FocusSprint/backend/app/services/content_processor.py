@@ -117,22 +117,39 @@ class ContentProcessor:
         download_dir = f"{settings.UPLOAD_DIR}/{content.user_id}/{content.id}"
         os.makedirs(download_dir, exist_ok=True)
         
-        logger.info(f"📥 Downloading YouTube video: {content.source_url}")
+        logger.info(f"📥 Downloading video: {content.source_url}")
+        
+        # Validate URL
+        if not self.youtube_downloader.validate_url(content.source_url) and not content.source_url.startswith('http'):
+            raise Exception("Invalid video URL format")
+        
+        # Download audio from YouTube or other video source
         audio_path = await self.youtube_downloader.download_audio(content.source_url, download_dir)
         
         if not audio_path:
-            raise Exception("YouTube download failed. This may be due to: 1) Outdated yt-dlp (run 'pip install --upgrade yt-dlp'), 2) YouTube blocking the request, or 3) Video restrictions. Try updating yt-dlp first.")
+            error_msg = (
+                "Video download failed. Possible causes:\n"
+                "1) Outdated yt-dlp library - run: pip install --upgrade yt-dlp\n"
+                "2) YouTube/video source blocking the request\n"
+                "3) Network connectivity issues\n"
+                "4) Invalid or restricted video URL\n"
+                "5) Missing ffmpeg - install from https://ffmpeg.org/download.html"
+            )
+            raise Exception(error_msg)
             
-        # Get Info
-        info = await self.youtube_downloader.get_video_info(content.source_url)
-        if info:
-            content.duration_seconds = info.get('duration', 0)
-            if not content.title or "Untitled" in content.title:
-                content.title = info.get('title', content.title)
-            db.commit()
-            logger.info(f"ℹ️ Video Info Updated: {content.title} ({content.duration_seconds}s)")
+        # Get Video Info (title, duration, etc.)
+        try:
+            info = await self.youtube_downloader.get_video_info(content.source_url)
+            if info:
+                content.duration_seconds = info.get('duration', 0)
+                if not content.title or "Untitled" in content.title:
+                    content.title = info.get('title', content.title)
+                db.commit()
+                logger.info(f"ℹ️ Video Info Updated: {content.title} ({content.duration_seconds}s)")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not retrieve video info: {e}, continuing with transcription...")
 
-        logger.info("mic: Transcribing audio file...")
+        logger.info("🎙️ Transcribing audio file...")
         return await self.transcriber.transcribe_audio(audio_path)
 
     async def _process_pdf(self, content: ContentItem) -> Optional[str]:
