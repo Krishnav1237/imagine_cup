@@ -4,7 +4,27 @@ import { createContext, useContext, useState, useEffect, ReactNode } from "react
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
-// ... [Keep SprintData, InventoryItem, UserProgress interfaces same as before] ...
+// Added missing interfaces
+interface InventoryItem {
+  id: string;
+  name: string;
+  cost: number;
+  metadata?: Record<string, any>;
+  purchasedAt?: number;
+}
+
+interface SprintData {
+  id: string;
+  durationSeconds: number;
+  completedAt: number;
+  coinsEarned?: number;
+}
+
+interface UserProgress {
+  currentSprintId?: string;
+  secondsFocusedToday?: number;
+  totalFocusedSeconds?: number;
+}
 
 // Add UserProfile interface
 interface UserProfile {
@@ -30,6 +50,7 @@ interface UserState {
   incrementStreak: () => void;
   resetStreak: () => void;
   syncWithBackend: () => Promise<void>; // New function
+  logout: () => void; // <-- added
 }
 
 const UserContext = createContext<UserState | undefined>(undefined);
@@ -107,8 +128,6 @@ export function UserProvider({ children }: { children: ReactNode }) {
     }
   }, [focusCoins, streak, inventory, completedSprints, currentProgress, isLoaded]);
 
-  // ... [Keep addCoins, spendCoins, etc. implementations] ...
-  
   const addCoins = (amount: number) => {
     setFocusCoins((prev) => prev + amount);
   };
@@ -142,6 +161,22 @@ export function UserProvider({ children }: { children: ReactNode }) {
     setStreak(0);
   };
 
+  // logout implementation
+  const logout = () => {
+    // clear auth & saved user data and reset local state
+    try {
+      localStorage.removeItem("focus_token");
+      localStorage.removeItem("focusflow_user");
+    } catch {}
+    setUser(null);
+    setFocusCoins(500);
+    setStreak(0);
+    setInventory([]);
+    setCompletedSprints([]);
+    setCurrentProgress(null);
+    setIsLoaded(true);
+  };
+
   return (
     <UserContext.Provider
       value={{
@@ -159,7 +194,8 @@ export function UserProvider({ children }: { children: ReactNode }) {
         setProgress,
         incrementStreak,
         resetStreak,
-        syncWithBackend
+        syncWithBackend,
+        logout, // <-- exposed
       }}
     >
       {children}

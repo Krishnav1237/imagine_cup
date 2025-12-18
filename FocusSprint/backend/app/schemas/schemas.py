@@ -50,16 +50,17 @@ class User(UserBase):
 # CONTENT SCHEMAS
 # =======================
 
-class ContentStatus(str, Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
 class ContentSourceType(str, Enum):
-    YOUTUBE = "youtube"
     PDF = "pdf"
     PPTX = "pptx"
+    YOUTUBE = "youtube"
+
+
+class ContentStatus(str, Enum):
+    PENDING = "pending"        # created, not yet processed
+    PROCESSING = "processing"  # currently running pipeline
+    COMPLETED = "completed"    # finished successfully
+    FAILED = "failed"          # terminal error
 
 class ContentChunk(BaseModel):
     id: int

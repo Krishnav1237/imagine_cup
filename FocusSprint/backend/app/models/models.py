@@ -1,7 +1,7 @@
 """
 SQLAlchemy Database Models.
 """
-from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, Float, Text, JSON
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
@@ -46,20 +46,22 @@ class ContentItem(Base):
 
 class ContentChunk(Base):
     __tablename__ = "content_chunks"
-
     id = Column(Integer, primary_key=True, index=True)
-    content_item_id = Column(Integer, ForeignKey("content_items.id"))
-    
-    sequence_number = Column(Integer)
-    title = Column(String)
+    content_item_id = Column(Integer, ForeignKey("content_items.id"), nullable=False)
+    sequence_number = Column(Integer, nullable=False, default=0)
+    title = Column(String(512), nullable=True)
     summary = Column(Text, nullable=True)
     text_content = Column(Text, nullable=True)
-    
-    duration_seconds = Column(Integer)
-    difficulty_level = Column(String, default="medium")
-    
+    duration_seconds = Column(Integer, nullable=True)
     key_concepts = Column(JSON, nullable=True)
     quiz_questions = Column(JSON, nullable=True)
+    difficulty_level = Column(String(32), nullable=True)
+
+    # New columns for chunk-card support
+    card_json = Column(Text, nullable=True)         # full chunk-card JSON payload
+    source_file = Column(String(512), nullable=True)
+    source_page = Column(Integer, nullable=True)
+    source_slide = Column(Integer, nullable=True)
 
     content_item = relationship("ContentItem", back_populates="chunks")
 

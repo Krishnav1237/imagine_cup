@@ -5,8 +5,8 @@ Handles file storage operations (Local vs Cloud/Azure).
 import os
 import logging
 from abc import ABC, abstractmethod
-from typing import BinaryIO, Optional
 from pathlib import Path
+from typing import BinaryIO, Optional, Any
 
 from app.config import settings
 
@@ -57,9 +57,10 @@ class StorageAdapter(ABC):
 class LocalStorageAdapter(StorageAdapter):
     """Implementation for Local Disk Storage"""
 
-    def __init__(self):
+    def __init__(self, base_path: Optional[str] = None):
         self.base_dir = Path(settings.UPLOAD_DIR)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.base_path = Path(base_path or os.getenv("LOCAL_STORAGE_PATH", "./uploads"))
         logger.info(f"📂 Local storage initialized at: {self.base_dir.absolute()}")
 
     async def save_file(self, file_obj: BinaryIO, destination: str, content_type: Optional[str] = None) -> str:
@@ -120,6 +121,42 @@ class LocalStorageAdapter(StorageAdapter):
     def get_file_url(self, file_path: str) -> str:
         # Returns the static mount path defined in main.py (usually /uploads/...)
         return f"/uploads/{file_path}"
+
+    def get_bytes(self, storage_path: str) -> bytes:
+        """
+        Read and return raw bytes for the given storage path.
+        Accepts:
+        - absolute paths
+        - relative paths (relative to CWD)
+        - paths that already include the base uploads prefix (e.g. "./uploads/2/13/original.pdf")
+        - keys relative to the configured base_path (e.g. "2/13/original.pdf")
+        """
+        # Try as an absolute or direct relative filesystem path first
+        try_path = Path(storage_path)
+        if try_path.exists():
+            return try_path.read_bytes()
+
+        # Normalize and try relative to configured base_path
+        rel = storage_path
+        # strip leading './' or '/'
+        rel = rel.lstrip("./\\")
+        # if path includes the base folder name, strip that prefix
+        base_name = self.base_path.name
+        if rel.startswith(base_name + os.sep):
+            rel = rel[len(base_name) + 1 :]
+
+        fp = (self.base_path / rel).resolve()
+        if fp.exists():
+            return fp.read_bytes()
+
+        # Final attempt: try joining raw provided string to base_path without normalization
+        fp2 = (self.base_path / storage_path).resolve()
+        if fp2.exists():
+            return fp2.read_bytes()
+
+        raise FileNotFoundError(
+            f"Local storage file not found. Tried: {try_path.resolve()!s}, {fp!s}, {fp2!s}"
+        )
 
 
 class AzureBlobStorageAdapter(StorageAdapter):

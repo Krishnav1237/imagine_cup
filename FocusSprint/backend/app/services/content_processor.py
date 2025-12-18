@@ -1,9 +1,11 @@
-import os
-import asyncio
+import io
+import json
 import logging
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List
 from sqlalchemy.orm import Session
+import requests
 
 from app.core.database import SessionLocal
 from app.models.models import ContentItem, ContentChunk
@@ -11,9 +13,11 @@ from app.schemas.schemas import ContentSourceType, ContentStatus
 from app.services.youtube_downloader import YouTubeDownloader
 from app.services.transcription.transcriber import get_transcriber
 from app.services.chunking.ai_chunker import AIChunker
+from app.services.chunking.utils import extract_key_concepts, generate_one_liner
 from app.services.storage.adapter import get_storage_adapter
 from app.services.pdf_processor import PDFProcessor
 from app.services.pptx_processor import PPTXProcessor
+from app.services.filters.academic_noise import contains_forbidden_terms
 from app.config import settings
 
 # Use the centralized logger configuration
@@ -32,134 +36,224 @@ class ContentProcessor:
 
     async def process_content_task(self, content_id: int):
         logger.info(f"🔄 [Task Start] Processing content_id={content_id}")
-        db = SessionLocal()
+        db: Session = SessionLocal()
         try:
             content = db.query(ContentItem).filter(ContentItem.id == content_id).first()
             if not content:
-                logger.error(f"❌ Content {content_id} not found in DB.")
+                logger.error("Content not found.")
                 return
-            
-            # 1. Update Status
-            content.status = ContentStatus.PROCESSING.value
-            db.commit()
-            logger.info(f"📝 Status updated to PROCESSING for '{content.title}'")
 
-            # 2. Get Transcript
-            logger.info(f"audio_process: Starting transcript generation for type={content.source_type}")
-            transcript = await self._get_transcript(content, db)
-            
-            if not transcript:
-                raise Exception("Transcript generation returned empty result.")
-            
-            content.transcript_text = transcript
+            # mark processing
+            content.status = ContentStatus.PROCESSING
+            content.processed_at = datetime.utcnow()
+            db.add(content)
             db.commit()
-            logger.info(f"✅ Transcript saved. Length: {len(transcript)} chars.")
 
-            # 3. Generate AI Chunks
-            duration = content.duration_seconds if content.duration_seconds else 600
-            logger.info(f"🧠 Invoking AI Chunker for '{content.title}' (Duration: {duration}s)")
-            
-            # Match AIChunker.generate_chunks signature (transcript, title, duration)
-            chunks_data = await self.chunker.generate_chunks(
-                transcript=transcript,
-                title=content.title or "Untitled",
-                duration=duration
-            )
+            # 1) Get source bytes
+            try:
+                file_bytes, used_field = self._resolve_file_bytes(content)
+                logger.info(f"🔎 Resolved content bytes using field: {used_field}")
+            except Exception as e:
+                raise RuntimeError("No valid storage path found on ContentItem or file not accessible.") from e
+
+            units = None
+            transcript = None
+            duration = None
+
+            # 2) Determine type and produce structured units
+            filename = self._safe_filename(content)
+            if content.source_type == ContentSourceType.PDF:
+                units = self.pdf_processor.get_structured_content(file_bytes, filename)
+            elif content.source_type == ContentSourceType.PPTX:
+                units = self.pptx_processor.get_structured_content(file_bytes, filename)
+            elif content.source_type == ContentSourceType.YOUTUBE:
+                # download & transcribe
+                transcript, duration = await self._process_youtube(content, db)
+            else:
+                # generic fallback to full text extraction
+                if content.file_name and content.file_name.lower().endswith('.pdf'):
+                    units = self.pdf_processor.get_structured_content(file_bytes, filename)
+                elif content.file_name and content.file_name.lower().endswith('.pptx'):
+                    units = self.pptx_processor.get_structured_content(file_bytes, filename)
+                else:
+                    # fallback: run generic text extraction then treat as single transcript
+                    transcript = (self.pdf_processor.extract_text(file_bytes) or self.pptx_processor.extract_text(file_bytes) or "")
+
+            # 3) Convert units to chunks directly (no AI chunker for structured units)
+            chunks_data = []
+            if units:
+                chunks_data = await self._units_to_chunks(units, content.title or filename or "Untitled")
+            elif transcript:
+                chunks_data = await self.chunker.generate_chunks(transcript=transcript, title=content.title or filename or "Untitled", duration=duration)
+            else:
+                raise RuntimeError("No extractable content available to chunk.")
 
             if not chunks_data:
-                raise Exception("AI Chunker returned no chunks.")
-            
-            logger.info(f"📦 Received {len(chunks_data)} chunks from AI. Saving to DB...")
+                raise RuntimeError("No chunks generated.")
 
-            # 4. Save Chunks
-            for idx, data in enumerate(chunks_data):
+            # 4) Save Chunks
+            for idx, chunk_data in enumerate(chunks_data):
                 chunk = ContentChunk(
                     content_item_id=content.id,
                     sequence_number=idx + 1,
-                    title=data.get('title', f"Part {idx + 1}"),
-                    summary=data.get('summary', ''),
-                    text_content=data.get('content', ''),
-                    duration_seconds=data.get('duration', 180),
-                    key_concepts=data.get('key_concepts', []),
-                    quiz_questions=data.get('quiz_questions', []),
-                    difficulty_level=data.get('difficulty', 'medium')
+                    title=chunk_data.get('title', f"Part {idx + 1}"),
+                    summary=chunk_data.get('summary', ''),
+                    text_content='\n'.join(chunk_data.get('bullets', [])),
+                    duration_seconds=int(chunk_data.get('duration_seconds', 0)),
+                    key_concepts=chunk_data.get('key_concepts', []),
+                    quiz_questions=[],
+                    difficulty_level='medium',
+                    source_file=chunk_data.get('source', {}).get('file'),
+                    source_page=chunk_data.get('source', {}).get('page'),
+                    source_slide=chunk_data.get('source', {}).get('slide'),
+                    card_json=json.dumps(chunk_data, ensure_ascii=False)
                 )
                 db.add(chunk)
-            
-            # 5. Complete
-            content.status = ContentStatus.COMPLETED.value
-            content.processed_at = datetime.utcnow()
-            db.commit()
-            logger.info(f"🎉 [Task Complete] Content {content_id} processed successfully.")
 
+            # finalize
+            content.status = ContentStatus.COMPLETED
+            content.processed_at = datetime.utcnow()
+            db.add(content)
+            db.commit()
+            logger.info(
+                f"✅ Content {content.id} processed into {len(chunks_data)} chunks."
+            )
         except Exception as e:
-            logger.error(f"❌ [Task Failed] Error processing {content_id}: {e}", exc_info=True)
-            content = db.query(ContentItem).filter(ContentItem.id == content_id).first()
-            if content:
-                content.status = ContentStatus.FAILED.value
-                content.error_message = str(e)
-                db.commit()
+            logger.exception(f"❌ Processing failed for content_id={content_id}: {e}")
+            try:
+                content = db.query(ContentItem).filter(ContentItem.id == content_id).first()
+                if content:
+                    content.status = ContentStatus.FAILED
+                    db.add(content)
+                    db.commit()
+            except Exception:
+                logger.exception("Failed to mark content as failed.")
         finally:
             db.close()
-            logger.info(f"🔒 DB Session closed for task {content_id}")
+
+    async def _units_to_chunks(self, units: List[dict], doc_title: str) -> List[dict]:
+        """
+        Convert structured units (with title + bullets) directly to chunk-cards.
+        Enforces knowledge-only content, no academic noise.
+        """
+        chunks = []
+        for unit in units:
+            title = unit.get('title', 'Untitled')
+            bullets = unit.get('bullets', [])
+            
+            # Skip if all bullets are metadata
+            if not bullets or len(bullets) == 0:
+                continue
+            
+            # Extract real key concepts (deterministic)
+            key_concepts = extract_key_concepts(bullets, max_concepts=5)
+            
+            # Generate strict one-liner
+            summary = generate_one_liner(title, bullets)
+            
+            # VALIDATION: Check for forbidden terms in output
+            has_noise, found_terms = contains_forbidden_terms(summary)
+            if has_noise:
+                logger.warning(
+                    f"⚠️ Summary contains noise terms {found_terms}: '{summary}'. "
+                    f"Regenerating..."
+                )
+                # Regenerate without metadata
+                summary = generate_one_liner(title, bullets[:3])
+            
+            # Also validate title
+            has_noise_title, _ = contains_forbidden_terms(title)
+            if has_noise_title:
+                logger.warning(f"⚠️ Title contains noise: '{title}'. Skipping unit.")
+                continue
+            
+            chunk = {
+                'title': title,
+                'bullets': bullets,
+                'summary': summary,
+                'key_concepts': key_concepts,
+                'duration_seconds': 0,
+                'source': {
+                    'file': unit.get('file'),
+                    'page': unit.get('page'),
+                }
+            }
+            chunks.append(chunk)
+        
+        return chunks
 
     async def _get_transcript(self, content: ContentItem, db: Session) -> Optional[str]:
-        if content.source_type == ContentSourceType.YOUTUBE.value:
-            return await self._process_youtube(content, db)
-        elif content.source_type == ContentSourceType.PDF.value:
-            return await self._process_pdf(content)
-        elif content.source_type == ContentSourceType.PPTX.value:
-            return await self._process_pptx(content)
-        else:
-            raise ValueError(f"Unknown source type: {content.source_type}")
+        # If pre-existing transcript stored in DB or storage, return it
+        return None
 
     async def _process_youtube(self, content: ContentItem, db: Session) -> Optional[str]:
-        download_dir = f"{settings.UPLOAD_DIR}/{content.user_id}/{content.id}"
-        os.makedirs(download_dir, exist_ok=True)
-        
-        logger.info(f"📥 Downloading video: {content.source_url}")
-        
-        # Validate URL
-        if not self.youtube_downloader.validate_url(content.source_url) and not content.source_url.startswith('http'):
-            raise Exception("Invalid video URL format")
-        
-        # Download audio from YouTube or other video source
-        audio_path = await self.youtube_downloader.download_audio(content.source_url, download_dir)
-        
-        if not audio_path:
-            error_msg = (
-                "Video download failed. Possible causes:\n"
-                "1) Outdated yt-dlp library - run: pip install --upgrade yt-dlp\n"
-                "2) YouTube/video source blocking the request\n"
-                "3) Network connectivity issues\n"
-                "4) Invalid or restricted video URL\n"
-                "5) Missing ffmpeg - install from https://ffmpeg.org/download.html"
-            )
-            raise Exception(error_msg)
-            
-        # Get Video Info (title, duration, etc.)
-        try:
-            info = await self.youtube_downloader.get_video_info(content.source_url)
-            if info:
-                content.duration_seconds = info.get('duration', 0)
-                if not content.title or "Untitled" in content.title:
-                    content.title = info.get('title', content.title)
-                db.commit()
-                logger.info(f"ℹ️ Video Info Updated: {content.title} ({content.duration_seconds}s)")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not retrieve video info: {e}, continuing with transcription...")
+        # download video and transcribe using configured transcriber
+        # returns (transcript, duration_seconds)
+        yt_bytes = self.youtube_downloader.download(content.origin_url)
+        # transcriber returns (text, duration_seconds)
+        transcript, duration = await self.transcriber.transcribe_bytes(yt_bytes)
+        return transcript, duration
 
-        logger.info("🎙️ Transcribing audio file...")
-        return await self.transcriber.transcribe_audio(audio_path)
+    def _safe_filename(self, content: ContentItem) -> str:
+        """
+        Return a usable filename for processors.
+        Falls back gracefully when original filename is unavailable.
+        """
+        if getattr(content, "file_name", None):
+            return content.file_name
 
-    async def _process_pdf(self, content: ContentItem) -> Optional[str]:
-        logger.info(f"📄 Extracting text from PDF: {content.file_path}")
-        with open(content.file_path, 'rb') as f:
-            return self.pdf_processor.extract_text(f.read())
+        if getattr(content, "file_path", None):
+            return Path(content.file_path).name
 
-    async def _process_pptx(self, content: ContentItem) -> Optional[str]:
-        logger.info(f"📊 Extracting text from PPTX: {content.file_path}")
-        with open(content.file_path, 'rb') as f:
-            return self.pptx_processor.extract_text(f.read())
+        if getattr(content, "storage_path", None):
+            return Path(content.storage_path).name
 
+        return content.title or "untitled"
+
+    def _resolve_file_bytes(self, content):
+        """
+        Try a list of likely ContentItem attributes and return (bytes, attribute_name).
+        If the attribute is a URL it will try to download it.
+        """
+        candidates = (
+            "storage_path",
+            "storage_key",
+            "file_path",
+            "upload_path",
+            "path",
+            "local_path",
+            "storage_url",
+            "origin_url",
+            "download_url",
+            "s3_key"
+        )
+        for attr in candidates:
+            val = getattr(content, attr, None)
+            if not val:
+                continue
+            # URL candidate -> try download
+            if isinstance(val, str) and (val.startswith("http://") or val.startswith("https://")):
+                try:
+                    r = requests.get(val, timeout=15)
+                    r.raise_for_status()
+                    return r.content, attr
+                except Exception as e:
+                    logger.debug(f"Failed to fetch URL from {attr}={val}: {e}")
+                    continue
+            # Local/key candidate -> use storage adapter
+            try:
+                b = self.storage.get_bytes(val)
+                return b, attr
+            except FileNotFoundError:
+                logger.debug(f"Storage file not found for {attr}={val}; trying next option.")
+            except Exception as e:
+                logger.error(f"Error reading storage for {attr}={val}: {e}")
+                raise
+        # helpful debug dump before raising
+        debug_map = {a: getattr(content, a, None) for a in candidates}
+        logger.error(f"No storage attribute matched for content id={content.id}. Candidates: {debug_map}")
+        raise RuntimeError("No storage attribute matched or file inaccessible.")
+
+
+# Export a shared processor instance for imports that expect `processor`
 processor = ContentProcessor()

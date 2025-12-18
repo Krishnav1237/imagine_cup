@@ -13,73 +13,47 @@ class PPTXProcessor:
     """PowerPoint presentation processor"""
     
     def extract_text(self, file_data: bytes) -> Optional[str]:
-        """
-        Extract text from PowerPoint file.
-        """
         logger.info("📊 Starting PPTX text extraction...")
         try:
             prs = Presentation(io.BytesIO(file_data))
             all_text = []
-            
             for slide_num, slide in enumerate(prs.slides, 1):
-                all_text.append(f"\n{'='*50}")
-                all_text.append(f"SLIDE {slide_num}")
-                all_text.append('='*50 + '\n')
-                
-                # Extract text from shapes
                 slide_text = self._extract_slide_text(slide)
                 if slide_text:
+                    all_text.append(f"\n--- Slide {slide_num} ---\n")
                     all_text.append(slide_text)
-                
-                # Add notes if present
-                if slide.has_notes_slide:
-                    notes = slide.notes_slide.notes_text_frame.text
-                    if notes.strip():
-                        all_text.append(f"\n[Speaker Notes: {notes}]\n")
-            
             result = '\n'.join(all_text)
             logger.info(f"✅ Extracted {len(result)} characters from PPTX.")
             return result
-        
         except Exception as e:
-            logger.error(f"❌ Error extracting from PowerPoint: {e}")
+            logger.error(f"❌ Error extracting PPTX: {e}")
             return None
     
     def _extract_slide_text(self, slide) -> str:
         """Extract text from all shapes in a slide"""
         text_parts = []
-        
         for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                text = shape.text.strip()
-                if text:
-                    # Check if it's a title or body
-                    if hasattr(shape, "shape_type"):
-                        if shape.shape_type == 1:  # Title placeholder
-                            text_parts.append(f"# {text}")
-                        else:
-                            text_parts.append(text)
-                    else:
-                        text_parts.append(text)
-            
-            # Handle tables
-            if shape.has_table:
-                table_text = self._extract_table_text(shape.table)
-                if table_text:
-                    text_parts.append(table_text)
-        
-        return '\n'.join(text_parts)
+            # text frames (paragraphs/bullets)
+            try:
+                if hasattr(shape, "text") and shape.text:
+                    text_parts.append(shape.text)
+            except Exception:
+                continue
+            # tables
+            if shape.shape_type == 19:  # TABLE
+                try:
+                    text_parts.append(self._extract_table_text(shape.table))
+                except Exception:
+                    continue
+        return '\n'.join([p.strip() for p in text_parts if p and p.strip()])
     
     def _extract_table_text(self, table) -> str:
         """Extract text from a table"""
         rows = []
-        
-        for row in table.rows:
-            cells = []
-            for cell in row.cells:
-                cells.append(cell.text.strip())
-            rows.append(' | '.join(cells))
-        
+        for r in table.rows:
+            cells = [c.text.strip() for c in r.cells if c.text and c.text.strip()]
+            if cells:
+                rows.append(' | '.join(cells))
         return '\n'.join(rows)
     
     def get_slide_count(self, file_data: bytes) -> int:
@@ -93,43 +67,87 @@ class PPTXProcessor:
             logger.error(f"❌ Error counting slides: {e}")
             return 0
     
-    def get_structured_content(self, file_data: bytes) -> List[Dict[str, str]]:
+    def get_structured_content(self, file_data: bytes, file_name: str) -> List[Dict[str, object]]:
         """
-        Extract content in structured format.
+        Return a list of structured units extracted from the PPTX.
+        Each unit: { "text": str, "file": file_name, "slide": int }
+        Slides longer than ~250 words are split by paragraph/sentence preserving bullets.
         """
+        logger.info("📊 Extracting structured PPTX content (slide-by-slide)...")
+        units: List[Dict[str, object]] = []
         try:
             prs = Presentation(io.BytesIO(file_data))
-            slides = []
-            
             for slide_num, slide in enumerate(prs.slides, 1):
-                slide_data = {
-                    'slide_number': slide_num,
-                    'title': '',
-                    'content': '',
-                    'notes': ''
-                }
-                
-                # Try to get title
-                if slide.shapes.title:
-                    slide_data['title'] = slide.shapes.title.text
-                
-                # Get body content
-                content_parts = []
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text:
-                        if shape != slide.shapes.title:
-                            content_parts.append(shape.text.strip())
-                
-                slide_data['content'] = '\n'.join(content_parts)
-                
-                # Get notes
-                if slide.has_notes_slide:
-                    slide_data['notes'] = slide.notes_slide.notes_text_frame.text
-                
-                slides.append(slide_data)
-            
-            return slides
-        
+                text = self._extract_slide_text(slide)
+                if not text:
+                    continue
+                # Normalize whitespace
+                text = text.replace('\r\n', '\n').strip()
+                # If slide is large split it into sub-units preserving bullet/paragraph boundaries
+                units_from_slide = self._split_slide_to_units(text, max_words=250)
+                for u in units_from_slide:
+                    units.append({"text": u.strip(), "file": file_name, "slide": slide_num})
+            logger.info(f"✅ Structured slide content returned with {len(units)} units.")
+            return units
         except Exception as e:
-            logger.error(f"❌ Error extracting structured content: {e}")
+            logger.error(f"❌ Error extracting structured PPTX content: {e}")
+            # Fallback: return whole text per slide
+            raw = self.extract_text(file_data) or ""
+            if raw:
+                # split on slide markers
+                parts = []
+                cur = []
+                current_slide = None
+                for line in raw.splitlines():
+                    m = None
+                    if line.startswith("--- Slide "):
+                        if cur and current_slide is not None:
+                            parts.append({"text":"\n".join(cur),"slide":current_slide})
+                        cur = []
+                        try:
+                            current_slide = int(line.split()[-1].strip().strip('-'))
+                        except Exception:
+                            current_slide = None
+                    else:
+                        cur.append(line)
+                if cur and current_slide is not None:
+                    parts.append({"text":"\n".join(cur),"slide":current_slide})
+                return [{"text":p["text"], "file":file_name, "slide":p["slide"]} for p in parts] if parts else []
             return []
+    
+    def _split_slide_to_units(self, slide_text: str, max_words: int = 250) -> List[str]:
+        """
+        Split slide text into smaller units when necessary. Preserve bullet groups and short headings.
+        """
+        import re
+        lines = [ln.strip() for ln in slide_text.split('\n') if ln.strip()]
+        # group bullets (lines that start with '-', '•', or are short)
+        paragraphs = []
+        cur = []
+        for ln in lines:
+            if re.match(r'^[-•\u2022\d\.\)]\s*', ln):
+                if cur:
+                    paragraphs.append(" ".join(cur))
+                    cur = []
+                paragraphs.append(ln)
+            else:
+                cur.append(ln)
+        if cur:
+            paragraphs.append(" ".join(cur))
+        # Now ensure units are under max_words by grouping adjacent paragraphs
+        units = []
+        cur = ""
+        cur_w = 0
+        for p in paragraphs:
+            w = len(re.findall(r'\w+', p))
+            if cur_w + w > max_words and cur:
+                units.append(cur.strip())
+                cur = p
+                cur_w = w
+            else:
+                cur = f"{cur} {p}".strip()
+                cur_w += w
+        if cur:
+            units.append(cur.strip())
+        # Filter out tiny items
+        return [u for u in units if len(u.split()) > 6]
