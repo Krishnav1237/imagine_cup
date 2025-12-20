@@ -314,3 +314,133 @@ def calculate_streak(user_id: int, db: Session) -> int:
             break
     
     return streak
+
+
+@router.get("/adhd-insights")
+async def get_adhd_insights(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get personalized ADHD-focused insights and recommendations.
+    
+    Analyzes user's attention patterns and provides actionable tips
+    specifically designed for ADHD learning optimization.
+    """
+    from app.services.adhd_features import adhd_features
+    
+    # Get user's sessions for analysis
+    sessions = db.query(LearningSession).filter(
+        LearningSession.user_id == current_user.id
+    ).order_by(LearningSession.started_at.desc()).limit(30).all()
+    
+    if not sessions:
+        return {
+            "has_data": False,
+            "message": "Complete some sprints to get personalized insights!",
+            "recommendations": [
+                "🎯 Start with short 5-minute sprints to build momentum",
+                "🌅 Try learning at different times to find your peak focus",
+                "🎮 Use the reward system to stay motivated!"
+            ]
+        }
+    
+    # Analyze attention patterns
+    attention_scores = [s.average_attention_score for s in sessions if s.average_attention_score]
+    avg_attention = sum(attention_scores) / len(attention_scores) if attention_scores else 0
+    
+    # Analyze session durations
+    durations = [s.total_duration_seconds for s in sessions if s.total_duration_seconds]
+    avg_duration = sum(durations) / len(durations) if durations else 0
+    
+    # Find best focus times (by hour of day)
+    hour_attention = {}
+    for session in sessions:
+        if session.started_at and session.average_attention_score:
+            hour = session.started_at.hour
+            if hour not in hour_attention:
+                hour_attention[hour] = []
+            hour_attention[hour].append(session.average_attention_score)
+    
+    best_hours = []
+    for hour, scores in hour_attention.items():
+        avg = sum(scores) / len(scores)
+        best_hours.append((hour, avg))
+    
+    best_hours.sort(key=lambda x: x[1], reverse=True)
+    peak_hours = [h[0] for h in best_hours[:3]]
+    
+    # Generate personalized recommendations
+    recommendations = []
+    
+    # Attention-based recommendations
+    if avg_attention >= 80:
+        recommendations.append("🎯 Amazing focus! You're in the top tier. Keep up the great work!")
+    elif avg_attention >= 60:
+        recommendations.append("💪 Good focus levels! Try the Pomodoro technique for even better results.")
+    else:
+        recommendations.append("🧘 Consider trying breathing exercises before sprints to improve focus.")
+        recommendations.append("🎧 Background music or white noise might help you concentrate.")
+    
+    # Duration-based recommendations
+    if avg_duration > 1800:  # 30+ minutes
+        recommendations.append("⚠️ Long sessions detected. Break them into smaller sprints for better retention!")
+    elif avg_duration < 300:  # Less than 5 minutes
+        recommendations.append("📈 Try gradually increasing sprint length as your focus improves.")
+    
+    # Time-based recommendations
+    if peak_hours:
+        peak_hour = peak_hours[0]
+        if 5 <= peak_hour <= 11:
+            recommendations.append(f"🌅 Morning person detected! Your peak focus is around {peak_hour}:00.")
+        elif 12 <= peak_hour <= 17:
+            recommendations.append(f"☀️ Afternoon learner! Try scheduling important sprints around {peak_hour}:00.")
+        else:
+            recommendations.append(f"🌙 Night owl detected! Your focus peaks around {peak_hour}:00.")
+    
+    # Streak-based encouragement
+    streak = current_user.current_streak or 0
+    if streak >= 7:
+        recommendations.append(f"🔥 {streak}-day streak! You're building an incredible habit!")
+    elif streak >= 3:
+        recommendations.append(f"⭐ {streak}-day streak! Keep going - habits form around day 21!")
+    else:
+        recommendations.append("🌱 Building consistency is key. Aim for a small daily goal!")
+    
+    # Calculate focus trend
+    if len(attention_scores) >= 5:
+        recent = sum(attention_scores[:5]) / 5
+        older = sum(attention_scores[-5:]) / 5
+
+        if recent > older:
+            trend = "improving"
+            trend_emoji = "📈"
+        elif recent < older:
+            trend = "declining"
+            trend_emoji = "📉"
+        else:
+            trend = "stable"
+            trend_emoji = "📊"
+    else:
+        trend = "not_enough_data"
+        trend_emoji = "📊"
+    
+    return {
+        "has_data": True,
+        "summary": {
+            "average_attention": round(avg_attention, 1),
+            "average_session_minutes": round(avg_duration / 60, 1),
+            "total_sessions": len(sessions),
+            "focus_trend": trend,
+            "trend_emoji": trend_emoji
+        },
+        "peak_focus_hours": peak_hours,
+        "recommendations": recommendations,
+        "adhd_tips": [
+            "🎯 Use visual timers - seeing time helps ADHD brains stay on track",
+            "📱 Enable Do Not Disturb during sprints to avoid distractions",
+            "🎮 Celebrate small wins! Every sprint completed is an achievement",
+            "🧠 Movement breaks help reset focus - try a quick stretch!",
+            "📝 Keep a focus journal to identify what works for you"
+        ]
+    }

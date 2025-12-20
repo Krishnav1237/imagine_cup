@@ -109,7 +109,82 @@ async def list_content(
     query = db.query(ContentItem).filter(ContentItem.user_id == current_user.id)
     if status:
         query = query.filter(ContentItem.status == status)
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(ContentItem.created_at.desc()).offset(skip).limit(limit).all()
+
+
+@router.get("/library")
+async def get_library(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get user's content library with progress tracking.
+    Returns rich data for library/dashboard display.
+    """
+    from sqlalchemy import func
+    
+    content_items = db.query(ContentItem).filter(
+        ContentItem.user_id == current_user.id
+    ).order_by(ContentItem.created_at.desc()).all()
+    
+    library = []
+    for content in content_items:
+        # Get chunk count
+        total_chunks = db.query(func.count(ContentChunk.id)).filter(
+            ContentChunk.content_item_id == content.id
+        ).scalar() or 0
+        
+        # Get completed chunks for this user
+        completed_chunks = 0
+        if total_chunks > 0:
+            completed_chunks = db.query(func.count(SessionChunk.id)).join(
+                LearningSession
+            ).filter(
+                SessionChunk.chunk_id.in_(
+                    db.query(ContentChunk.id).filter(ContentChunk.content_item_id == content.id)
+                ),
+                LearningSession.user_id == current_user.id,
+                SessionChunk.is_completed == True
+            ).scalar() or 0
+        
+        # Calculate progress
+        progress_pct = (completed_chunks / total_chunks * 100) if total_chunks > 0 else 0
+        
+        # Estimate duration (5 min per chunk)
+        estimated_duration = total_chunks * 5
+        
+        library.append({
+            "id": content.id,
+            "title": content.title,
+            "source_type": content.source_type,
+            "source_url": content.source_url,
+            "thumbnail_url": content.thumbnail_url,
+            "status": content.status,
+            "error_message": content.error_message,
+            "created_at": content.created_at.isoformat() if content.created_at else None,
+            "processed_at": content.processed_at.isoformat() if content.processed_at else None,
+            "duration_seconds": content.duration_seconds,
+            "chunk_count": total_chunks,
+            "completed_chunks": completed_chunks,
+            "progress_percentage": round(progress_pct, 1),
+            "estimated_duration_minutes": estimated_duration,
+            "is_complete": completed_chunks >= total_chunks and total_chunks > 0
+        })
+    
+    # Summary stats
+    total_items = len(library)
+    completed_items = len([l for l in library if l["is_complete"]])
+    in_progress_items = len([l for l in library if 0 < l["progress_percentage"] < 100])
+    
+    return {
+        "items": library,
+        "summary": {
+            "total": total_items,
+            "completed": completed_items,
+            "in_progress": in_progress_items,
+            "not_started": total_items - completed_items - in_progress_items
+        }
+    }
 
 @router.get("/{content_id}", response_model=ContentItemDetail)
 async def get_content(
@@ -170,9 +245,17 @@ async def complete_chunk(
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Mark a sprint (chunk) as completed and track progress using real data.
+    Mark a sprint (chunk) as completed and track progress.
+    
+    Uses ADHD-optimized reward system with:
+    - Dopamine-friendly variable rewards
+    - Streak tracking and protection
+    - Milestone celebrations
+    - Break suggestions
     """
-    logger.info(f"🏁 Completing chunk {chunk_id} for content {content_id}")
+    from app.services.adhd_features import adhd_features
+    
+    logger.info(f"🏁 Completing chunk {chunk_id} for content {content_id} by user {current_user.id}")
 
     # 1. Verify Ownership
     content = db.query(ContentItem).filter(
@@ -184,7 +267,6 @@ async def complete_chunk(
         raise HTTPException(status_code=404, detail="Content not found")
 
     # 2. Find or Create Learning Session
-    # We group sprints into a "Session" for analytics
     session_name = f"Session for {content.title}"
     session = db.query(LearningSession).filter(
         LearningSession.user_id == current_user.id, 
@@ -197,7 +279,8 @@ async def complete_chunk(
             session_name=session_name,
             started_at=datetime.utcnow(),
             total_chunks_viewed=0,
-            total_duration_seconds=0
+            total_duration_seconds=0,
+            average_attention_score=0.0
         )
         db.add(session)
         db.commit()
@@ -211,7 +294,11 @@ async def complete_chunk(
     
     if existing:
         logger.info(f"ℹ️ Chunk {chunk_id} already completed.")
-        return {"status": "already_completed", "coins_earned": 0}
+        return {
+            "status": "already_completed", 
+            "coins_earned": 0,
+            "message": "This sprint was already completed!"
+        }
 
     # 4. Record Completion
     session_chunk = SessionChunk(
@@ -229,13 +316,75 @@ async def complete_chunk(
     session.total_chunks_viewed += 1
     session.total_duration_seconds += completion_data.time_spent_seconds
     
-    # 6. Calculate Coins (e.g. 10 base + bonus for good quiz score)
-    coins_earned = 10 + int(completion_data.quiz_score / 10)
+    # Update session average attention
+    if session.average_attention_score:
+        # Running average
+        n = session.total_chunks_viewed
+        session.average_attention_score = (
+            (session.average_attention_score * (n - 1) + completion_data.average_attention) / n
+        )
+    else:
+        session.average_attention_score = completion_data.average_attention
+    
+    # 6. Calculate ADHD-Optimized Rewards
+    reward = adhd_features.calculate_reward(
+        focus_percentage=completion_data.average_attention,
+        current_streak=current_user.current_streak,
+        quiz_score=completion_data.quiz_score,
+        time_spent_seconds=completion_data.time_spent_seconds
+    )
+    
+    # 7. Update User's Focus Coins (ACTUALLY PERSIST!)
+    current_user.focus_coins = (current_user.focus_coins or 0) + reward["total_coins"]
+    current_user.total_sprints_completed = (current_user.total_sprints_completed or 0) + 1
+    
+    # 8. Update User's Streak
+    streak_update = adhd_features.update_streak(
+        last_activity_date=current_user.last_activity_date,
+        current_streak=current_user.current_streak or 0,
+        longest_streak=current_user.longest_streak or 0
+    )
+    current_user.current_streak = streak_update["new_streak"]
+    current_user.longest_streak = streak_update["new_longest_streak"]
+    current_user.last_activity_date = streak_update["last_activity_date"]
+    
+    # 9. Check for Milestone Celebration
+    milestone = adhd_features.get_milestone_celebration(current_user.total_sprints_completed)
+    if milestone:
+        # Add milestone bonus coins
+        current_user.focus_coins += milestone["coins"]
+        reward["messages"].append(f"🎉 MILESTONE: {milestone['message']}")
+        logger.info(f"🎉 User {current_user.id} hit milestone: {milestone['milestone']} sprints!")
+    
+    # 10. Check for Break Suggestion
+    break_suggestion = adhd_features.should_suggest_break(session.total_duration_seconds)
+    
+    # 11. Get Encouragement Message
+    encouragement = adhd_features.get_encouragement_message(
+        completion_data.average_attention,
+        current_user.current_streak
+    )
     
     db.commit()
-    logger.info(f"✅ Chunk {chunk_id} complete. Score: {completion_data.quiz_score}, Attn: {completion_data.average_attention}")
+    
+    logger.info(f"✅ Chunk {chunk_id} complete. Coins: +{reward['total_coins']}, Total Balance: {current_user.focus_coins}, Streak: {current_user.current_streak}")
     
     return {
-        "status": "success", 
-        "coins_earned": coins_earned
+        "status": "success",
+        "coins_earned": reward["total_coins"],
+        "reward_breakdown": reward,
+        "new_balance": current_user.focus_coins,
+        "streak": {
+            "current": current_user.current_streak,
+            "longest": current_user.longest_streak,
+            "increased": streak_update.get("streak_increased", False)
+        },
+        "milestone": milestone,
+        "break_suggestion": break_suggestion if break_suggestion["should_break"] else None,
+        "encouragement": encouragement,
+        "session_stats": {
+            "chunks_completed": session.total_chunks_viewed,
+            "total_time_seconds": session.total_duration_seconds,
+            "average_attention": round(session.average_attention_score, 2) if session.average_attention_score else 0
+        }
     }

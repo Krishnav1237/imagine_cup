@@ -67,8 +67,47 @@ class ContentProcessor:
             elif content.source_type == ContentSourceType.PPTX:
                 units = self.pptx_processor.get_structured_content(file_bytes, filename)
             elif content.source_type == ContentSourceType.YOUTUBE:
-                # download & transcribe
+                # download & transcribe with optional VLM analysis
                 transcript, duration = await self._process_youtube(content, db)
+                
+                # Try VLM-enhanced chunking if video file available
+                try:
+                    from app.services.video_vision_processor import video_vision_processor
+                    
+                    # Check if we have the video file for frame extraction
+                    video_path = await self._get_video_path(content)
+                    if video_path and video_vision_processor.openai_client:
+                        logger.info("🎬 Using VLM for visual context analysis")
+                        
+                        # Extract keyframes
+                        frames = await video_vision_processor.extract_keyframes(
+                            video_path, 
+                            interval_seconds=30,
+                            max_frames=15
+                        )
+                        
+                        if frames:
+                            # Generate VLM-enhanced chunks
+                            vlm_chunks = await video_vision_processor.analyze_with_vlm(
+                                frames=frames,
+                                transcript=transcript,
+                                title=content.title or "Untitled"
+                            )
+                            
+                            if vlm_chunks:
+                                # Convert VLM chunks to standard format with visual context
+                                for vc in vlm_chunks:
+                                    vc['visual_context'] = vc.get('visual_context')
+                                    vc['key_visual_elements'] = vc.get('key_visual_elements', [])
+                                    vc['key_frame_timestamp'] = vc.get('key_frame_timestamp')
+                                    vc['bullets'] = vc.get('content', [])
+                                chunks_data = vlm_chunks
+                                logger.info(f"✅ VLM generated {len(chunks_data)} visual-context chunks")
+                            
+                            # Cleanup temp frames
+                            video_vision_processor.cleanup_frames(frames)
+                except Exception as vlm_error:
+                    logger.warning(f"⚠️ VLM processing failed, using text-only: {vlm_error}")
             else:
                 # generic fallback to full text extraction
                 if content.file_name and content.file_name.lower().endswith('.pdf'):
@@ -98,14 +137,18 @@ class ContentProcessor:
                     sequence_number=idx + 1,
                     title=chunk_data.get('title', f"Part {idx + 1}"),
                     summary=chunk_data.get('summary', ''),
-                    text_content='\n'.join(chunk_data.get('bullets', [])),
+                    text_content='\n'.join(chunk_data.get('bullets', chunk_data.get('content', []))),
                     duration_seconds=int(chunk_data.get('duration_seconds', 0)),
                     key_concepts=chunk_data.get('key_concepts', []),
                     quiz_questions=[],
-                    difficulty_level='medium',
+                    difficulty_level=chunk_data.get('complexity', 'medium'),
                     source_file=chunk_data.get('source', {}).get('file'),
                     source_page=chunk_data.get('source', {}).get('page'),
                     source_slide=chunk_data.get('source', {}).get('slide'),
+                    # VLM visual context fields
+                    visual_context=chunk_data.get('visual_context'),
+                    key_visual_elements=chunk_data.get('key_visual_elements'),
+                    key_frame_timestamp=chunk_data.get('key_frame_timestamp'),
                     card_json=json.dumps(chunk_data, ensure_ascii=False)
                 )
                 db.add(chunk)
@@ -186,13 +229,61 @@ class ContentProcessor:
         # If pre-existing transcript stored in DB or storage, return it
         return None
 
-    async def _process_youtube(self, content: ContentItem, db: Session) -> Optional[str]:
-        # download video and transcribe using configured transcriber
-        # returns (transcript, duration_seconds)
-        yt_bytes = self.youtube_downloader.download(content.origin_url)
-        # transcriber returns (text, duration_seconds)
-        transcript, duration = await self.transcriber.transcribe_bytes(yt_bytes)
-        return transcript, duration
+    async def _process_youtube(self, content: ContentItem, db: Session) -> tuple:
+        """
+        Download YouTube video, transcribe audio, and return (transcript, duration_seconds).
+        Also updates content with video metadata (thumbnail, duration).
+        """
+        logger.info(f"🎬 Processing YouTube content: {content.source_url}")
+        
+        try:
+            # 1. Get video info first (for metadata)
+            video_info = await self.youtube_downloader.get_video_info(content.source_url)
+            if video_info:
+                content.duration_seconds = video_info.get('duration')
+                # Store thumbnail URL if available
+                if not content.thumbnail_url:
+                    # YouTube thumbnail pattern
+                    import re
+                    video_id_match = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', content.source_url)
+                    if video_id_match:
+                        video_id = video_id_match.group(1)
+                        content.thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+                db.add(content)
+                db.commit()
+                logger.info(f"📺 Video info: duration={video_info.get('duration')}s, title={video_info.get('title')}")
+            
+            # 2. Download audio
+            destination_folder = f"{content.user_id}/{content.id}"
+            audio_path = await self.youtube_downloader.download_audio(
+                content.source_url,
+                destination_folder
+            )
+            
+            if not audio_path:
+                raise RuntimeError("Failed to download audio from YouTube")
+            
+            logger.info(f"🎵 Audio downloaded to: {audio_path}")
+            
+            # 3. Transcribe audio
+            transcript = await self.transcriber.transcribe_audio(audio_path)
+            
+            if not transcript:
+                raise RuntimeError("Transcription failed or returned empty")
+            
+            logger.info(f"📝 Transcription complete: {len(transcript)} characters")
+            
+            # Store transcript in content item
+            content.transcript_text = transcript
+            db.add(content)
+            db.commit()
+            
+            duration = content.duration_seconds or (video_info.get('duration') if video_info else None)
+            return transcript, duration
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube processing failed: {e}")
+            raise RuntimeError(f"YouTube processing failed: {str(e)}") from e
 
     def _safe_filename(self, content: ContentItem) -> str:
         """
@@ -209,6 +300,29 @@ class ContentProcessor:
             return Path(content.storage_path).name
 
         return content.title or "untitled"
+
+    async def _get_video_path(self, content: ContentItem) -> Optional[str]:
+        """
+        Get the local video file path for VLM frame extraction.
+        Returns full path if video exists locally, None otherwise.
+        """
+        # For YouTube, we store audio only by default
+        # But if video was downloaded, it would be here
+        destination_folder = f"{content.user_id}/{content.id}"
+        possible_paths = [
+            Path(settings.UPLOAD_DIR) / destination_folder / "video.mp4",
+            Path(settings.UPLOAD_DIR) / destination_folder / "audio.mp3",  # Can extract frames from mp3's source
+        ]
+        
+        for path in possible_paths:
+            if path.exists():
+                return str(path)
+        
+        # Check if source_url is a local file
+        if content.source_url and Path(content.source_url).exists():
+            return content.source_url
+        
+        return None
 
     def _resolve_file_bytes(self, content):
         """

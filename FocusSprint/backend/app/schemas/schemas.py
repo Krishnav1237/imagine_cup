@@ -43,6 +43,12 @@ class User(UserBase):
     default_chunk_length: int = 5
     preferred_difficulty: str = "medium"
     
+    # Gamification
+    focus_coins: int = 500
+    current_streak: int = 0
+    longest_streak: int = 0
+    total_sprints_completed: int = 0
+    
     class Config:
         from_attributes = True
 

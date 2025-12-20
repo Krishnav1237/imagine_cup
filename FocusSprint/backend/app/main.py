@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.core.database import init_db
-from app.api.v1 import auth, content, analytics
+from app.api.v1 import auth, content, analytics, gamification
 
 # Configure Centralized Logging
 logging.basicConfig(
@@ -78,6 +78,19 @@ app.include_router(
     analytics.router,
     prefix=f"{settings.API_V1_PREFIX}/analytics",
     tags=["Analytics"]
+)
+app.include_router(
+    gamification.router,
+    prefix=f"{settings.API_V1_PREFIX}/gamification",
+    tags=["Gamification"]
+)
+
+# ADHD Learning Features (NEW)
+from app.api.v1 import adhd_learning
+app.include_router(
+    adhd_learning.router,
+    prefix=f"{settings.API_V1_PREFIX}/adhd-learning",
+    tags=["ADHD Learning"]
 )
 
 # 3. Mount Static Files
