@@ -45,7 +45,12 @@ export default function UploadPage() {
           setError(data.error_message || "Processing failed. Please try again.");
         } else {
           // Update status message based on backend state (pending, processing)
-          setStatusMessage(`Analyzing content... (${data.status})`);
+          setStatusMessage(
+            data.stage
+              ? `Processing: ${data.stage.replace("_", " ")}`
+              : `Processing...`
+          );
+
         }
 
         if (retries >= maxRetries) {

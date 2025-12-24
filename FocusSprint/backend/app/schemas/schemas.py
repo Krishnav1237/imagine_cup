@@ -74,9 +74,15 @@ class ContentChunk(BaseModel):
     title: str
     summary: Optional[str] = None
     text_content: Optional[str] = None
-    duration_seconds: int
+    duration_seconds: Optional[int] = None
     difficulty_level: Optional[str] = None
-    
+    source_file: Optional[str] = None
+    source_page: Optional[int] = None
+    source_slide: Optional[int] = None
+
+    generation_model: Optional[str] = None
+    generation_strategy: Optional[str] = None
+
     # Quiz Data
     key_concepts: Optional[List[str]] = []
     quiz_questions: Optional[List[Dict[str, Any]]] = []
@@ -90,6 +96,7 @@ class ContentItem(BaseModel):
     source_type: str
     source_url: Optional[str] = None
     status: str
+    stage: Optional[str] = None
     created_at: datetime
     processed_at: Optional[datetime] = None
     error_message: Optional[str] = None

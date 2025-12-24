@@ -19,22 +19,40 @@ export interface ContentItem {
   source_type: string;
   source_url?: string;
   thumbnail_url?: string;
+
   status: string;
+  stage?: string | null;
+
   error_message?: string;
   chunk_count?: number;
   completed_chunks?: number;
   progress_percentage?: number;
+
   created_at: string;
+  processed_at?: string | null;
 }
 
 export interface ContentChunk {
   id: number;
+  sequence_number: number;
+
   title: string;
-  text_content: string;
+  summary?: string;
+  text_content?: string;
+
+  source_file?: string;
+  source_page?: number;
+  source_slide?: number;
+
+  generation_model?: string;
+  generation_strategy?: string;
+
+  key_concepts?: string[];
+  quiz_questions?: any[];
+
+  difficulty_level?: string;
   visual_context?: string;
   key_frame_timestamp?: number;
-  difficulty_level: string;
-  sequence_number: number;
 }
 
 export interface GamificationStats {

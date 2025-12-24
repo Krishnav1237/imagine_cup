@@ -46,12 +46,18 @@ class ContentItem(Base):
     
     status = Column(String, default="pending") # pending, processing, completed, failed
     error_message = Column(String, nullable=True)
-    
+    # Processing diagnostics
+    stage = Column(String, nullable=True)          # e.g. DOCUMENT_PIPELINE, RAG, LLM, VIDEO_PIPELINE
+    retry_count = Column(Integer, default=0)       # For controlled retries
+
     # Metadata
     duration_seconds = Column(Integer, nullable=True)
     transcript_text = Column(Text, nullable=True)
     processed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Semantic metadata (future use)
+    language = Column(String(32), nullable=True)
+    estimated_reading_time = Column(Integer, nullable=True)  # seconds
 
     owner = relationship("User", back_populates="content_items")
     chunks = relationship("ContentChunk", back_populates="content_item", cascade="all, delete-orphan")
@@ -68,19 +74,29 @@ class ContentChunk(Base):
     key_concepts = Column(JSON, nullable=True)
     quiz_questions = Column(JSON, nullable=True)
     difficulty_level = Column(String(32), nullable=True)
+    # Generation provenance
+    generation_model = Column(String(128), nullable=True)  # e.g. llama3:8b-instruct-q4_K_M
+    generation_strategy = Column(String(64), nullable=True)  # RAG, VLM, TRANSCRIPT_ONLY
 
     # Chunk-card support
     card_json = Column(Text, nullable=True)         # full chunk-card JSON payload
     source_file = Column(String(512), nullable=True)
     source_page = Column(Integer, nullable=True)
     source_slide = Column(Integer, nullable=True)
-    
+    # RAG traceability
+    source_confidence = Column(Float, nullable=True)   # similarity / confidence score
+    rag_group_id = Column(Integer, nullable=True)      # which semantic group produced this chunk
+
     # VLM Visual Context (NEW)
     visual_context = Column(Text, nullable=True)    # Description of what's shown visually
     key_visual_elements = Column(JSON, nullable=True)  # List of visual elements
     key_frame_timestamp = Column(Float, nullable=True)  # Timestamp of key frame in seconds
 
     content_item = relationship("ContentItem", back_populates="chunks")
+    # Quality & usage signals
+    view_count = Column(Integer, default=0)
+    avg_rating = Column(Float, nullable=True)
+
 
 class LearningSession(Base):
     __tablename__ = "learning_sessions"
@@ -95,6 +111,10 @@ class LearningSession(Base):
     total_duration_seconds = Column(Integer, default=0)
     total_chunks_viewed = Column(Integer, default=0)
     average_attention_score = Column(Float, nullable=True)  # ADHD attention tracking
+    # Session-level control signals
+    focus_mode_enabled = Column(Boolean, default=False)
+    adaptive_pacing = Column(Boolean, default=True)
+
     
     user = relationship("User", back_populates="sessions")
     chunk_progress = relationship("SessionChunk", back_populates="session")
@@ -112,6 +132,8 @@ class SessionChunk(Base):
     
     quiz_score = Column(Float, nullable=True)
     average_attention = Column(Float, nullable=True)
+    attention_drops = Column(Integer, default=0)  # number of detected attention losses
+
     
     session = relationship("LearningSession", back_populates="chunk_progress")
 

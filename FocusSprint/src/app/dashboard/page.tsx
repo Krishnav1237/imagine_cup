@@ -15,6 +15,7 @@ interface ContentItem {
   title: string;
   source_type: "youtube" | "pdf" | "pptx";
   status: "pending" | "processing" | "completed" | "failed";
+  stage?: string | null;
   created_at: string;
 }
 
@@ -23,6 +24,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
+  // 🔹 EXISTING useEffect (DO NOT MOVE)
   useEffect(() => {
     const fetchContent = async () => {
       const token = localStorage.getItem("focus_token");
@@ -32,12 +34,12 @@ export default function Dashboard() {
       }
 
       try {
-        const res = await fetch(`${API_URL}/content/`, {
+        const res = await fetch(`${API_URL}/content/library`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
           const data = await res.json();
-          setContent(data.reverse()); // Newest first
+          setContent(data.items ?? data); // depending on backend response
         }
       } catch (error) {
         console.error("Failed to load content", error);
@@ -48,6 +50,18 @@ export default function Dashboard() {
 
     fetchContent();
   }, [router]);
+
+  // ✅ ADD THIS useEffect HERE (AUTO-REFRESH)
+  useEffect(() => {
+    const hasProcessing = content.some(c => c.status === "processing");
+    if (!hasProcessing) return;
+
+    const interval = setInterval(() => {
+      window.location.reload();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [content]);
 
   const getIcon = (type: string) => {
     switch (type) {
@@ -108,7 +122,10 @@ export default function Dashboard() {
                     item.status === 'processing' ? 'bg-yellow-500/10 text-yellow-400' :
                     'bg-red-500/10 text-red-400'
                   }`}>
-                    {item.status.toUpperCase()}
+                    {item.status === "processing"
+                      ? item.stage ?? "PROCESSING"
+                      : item.status.toUpperCase()}
+
                   </span>
                 </div>
 
@@ -130,7 +147,7 @@ export default function Dashboard() {
                   </Link>
                 ) : (
                   <Button disabled className="w-full bg-[#1e1e2e] text-[#8888a0] border border-[#2a2a3e] rounded-xl opacity-50 cursor-not-allowed">
-                    Processing...
+                    {item.stage ? item.stage.replace("_", " ") : "Processing..."}
                   </Button>
                 )}
               </motion.div>

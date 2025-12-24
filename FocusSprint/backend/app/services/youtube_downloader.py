@@ -62,6 +62,69 @@ class YouTubeDownloader:
         # If no video ID found, return original URL
         return url
     
+    async def download_video(
+        self,
+        link: str,
+        output_dir: str,
+        filename: str = "original"
+    ) -> str:
+        """
+        Download full video using yt-dlp CLI (trusted logic).
+        Returns absolute path to MP4.
+        """
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        final_mp4 = output_dir / f"{filename}.mp4"
+
+        # If already downloaded, reuse
+        if final_mp4.exists():
+            logger.info(f"♻️ Reusing existing video → {final_mp4}")
+            return str(final_mp4)
+
+        output_template = str(output_dir / f"{filename}.%(ext)s")
+
+        command = [
+            "yt-dlp",
+            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
+            "--merge-output-format", "mp4",
+            "--output", output_template,
+            link
+        ]
+
+        logger.info("⬇️ Downloading full video via yt-dlp CLI")
+
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _run():
+                return subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False
+                )
+
+            logger.info("⬇️ Downloading full video via yt-dlp CLI")
+
+            result = await loop.run_in_executor(None, _run)
+
+            if result.returncode != 0:
+                logger.error("❌ yt-dlp CLI failed")
+                logger.error(result.stderr.decode(errors="ignore"))
+                raise RuntimeError("Video download failed")
+
+        except Exception as e:
+            logger.error("❌ Video download exception")
+            raise RuntimeError("Video download failed") from e
+
+        if not final_mp4.exists():
+            raise RuntimeError("MP4 file not produced")
+
+        logger.info(f"✅ Video downloaded → {final_mp4}")
+        return str(final_mp4)
+
     async def download_audio(
         self,
         url: str,

@@ -62,6 +62,7 @@ async def upload_content(
         source_type=source_type,
         source_url=source_url,
         status=ContentStatus.PENDING.value,
+        stage="INITIALIZING",
         created_at=datetime.utcnow()
     )
     db.add(new_content)
@@ -168,7 +169,8 @@ async def get_library(
             "completed_chunks": completed_chunks,
             "progress_percentage": round(progress_pct, 1),
             "estimated_duration_minutes": estimated_duration,
-            "is_complete": completed_chunks >= total_chunks and total_chunks > 0
+            "is_complete": completed_chunks >= total_chunks and total_chunks > 0,
+            "stage": content.stage,
         })
     
     # Summary stats
@@ -209,10 +211,19 @@ async def get_content(
     ).order_by(ContentChunk.sequence_number).all()
     
     return {
-        **content_item.__dict__,
+        "id": content_item.id,
+        "title": content_item.title,
+        "source_type": content_item.source_type,
+        "source_url": content_item.source_url,
+        "status": content_item.status,
+        "stage": content_item.stage,
+        "created_at": content_item.created_at,
+        "processed_at": content_item.processed_at,
+        "error_message": content_item.error_message,
         "chunks": chunks,
-        "chunk_count": len(chunks)
+        "chunk_count": len(chunks),
     }
+
 
 @router.delete("/{content_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_content(
@@ -311,6 +322,13 @@ async def complete_chunk(
         average_attention=completion_data.average_attention
     )
     db.add(session_chunk)
+    chunk = db.query(ContentChunk).filter(
+        ContentChunk.id == chunk_id,
+        ContentChunk.content_item_id == content_id
+    ).first()
+    if chunk:
+        chunk.view_count = (chunk.view_count or 0) + 1
+
     
     # 5. Update Session Stats
     session.total_chunks_viewed += 1
