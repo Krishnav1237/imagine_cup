@@ -1,4 +1,6 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+const REQUEST_TIMEOUT = 30000; // 30 seconds
+const MAX_RETRIES = 2;
 
 // ============ Types ============
 
@@ -48,11 +50,18 @@ export interface ContentChunk {
   generation_strategy?: string;
 
   key_concepts?: string[];
-  quiz_questions?: any[];
+  quiz_questions?: QuizQuestion[];
 
   difficulty_level?: string;
   visual_context?: string;
   key_frame_timestamp?: number;
+}
+
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  correct_answer: number;
+  explanation?: string;
 }
 
 export interface GamificationStats {
@@ -72,6 +81,26 @@ export interface ShopItem {
   affordable: boolean;
 }
 
+// ============ Error Classes ============
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code?: string
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export class AuthError extends ApiError {
+  constructor(message: string = "Authentication required") {
+    super(message, 401, "AUTH_ERROR");
+    this.name = "AuthError";
+  }
+}
+
 // ============ Helpers ============
 
 function getToken(): string | null {
@@ -79,21 +108,76 @@ function getToken(): string | null {
   return localStorage.getItem("focus_token");
 }
 
-async function authFetch(url: string, options: RequestInit = {}) {
+function clearAuth(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem("focus_token");
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function authFetch(url: string, options: RequestInit = {}, retries = MAX_RETRIES): Promise<any> {
   const token = getToken();
-  const headers = {
-    ...options.headers,
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string> || {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 
-  const res = await fetch(url, { ...options, headers });
+  // Add timeout using AbortController
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || `Request failed: ${res.status}`);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+
+    // Handle token expiry
+    if (res.status === 401) {
+      clearAuth();
+      throw new AuthError("Session expired. Please log in again.");
+    }
+
+    // Handle server errors with retry
+    if (res.status >= 500 && retries > 0) {
+      console.warn(`Server error ${res.status}, retrying... (${retries} left)`);
+      await sleep(1000 * (MAX_RETRIES - retries + 1)); // Exponential backoff
+      return authFetch(url, options, retries - 1);
+    }
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new ApiError(
+        data.detail || `Request failed: ${res.status}`,
+        res.status,
+        data.code
+      );
+    }
+
+    return res.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    // Handle network errors with retry
+    if (error instanceof TypeError && error.message.includes("fetch") && retries > 0) {
+      console.warn(`Network error, retrying... (${retries} left)`);
+      await sleep(1000);
+      return authFetch(url, options, retries - 1);
+    }
+    
+    // Handle timeout
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError("Request timeout", 408, "TIMEOUT");
+    }
+    
+    throw error;
   }
-
-  return res.json();
 }
 
 // ============ Auth ============

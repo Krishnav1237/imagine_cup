@@ -76,11 +76,14 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_NAME: str = "gpt-4"
 
     # 🔹 Local LLM (Ollama)
+    OLLAMA_URL: str = "http://localhost:11434/api/generate"
     OLLAMA_MODEL: str = "llama3:8b-instruct-q4_K_M"
     OLLAMA_TIMEOUT_SECONDS: int = 120
 
-    # VLM
-    LOCAL_VLM_BACKEND: str = "llava"
+    # 🔹 OpenAI / VLM
+    OPENAI_API_KEY: Optional[str] = None
+    VLM_MODEL: str = "gpt-4o"
+    ENABLE_VLM: bool = True
     VLM_FRAME_SAMPLE_RATE: int = 2
 
     # Video

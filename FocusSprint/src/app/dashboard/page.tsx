@@ -51,16 +51,72 @@ export default function Dashboard() {
     fetchContent();
   }, [router]);
 
-  // ✅ ADD THIS useEffect HERE (AUTO-REFRESH)
+  // 🔹 WebSocket for real-time content updates
   useEffect(() => {
+    const token = localStorage.getItem("focus_token");
+    if (!token) return;
+    
     const hasProcessing = content.some(c => c.status === "processing");
     if (!hasProcessing) return;
 
-    const interval = setInterval(() => {
-      window.location.reload();
-    }, 5000);
+    // Build WebSocket URL
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const apiHost = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/^https?:\/\//, "").replace(/\/api\/v1$/, "");
+    const wsUrl = `${wsProtocol}//${apiHost}/ws/content-status?token=${token}`;
+    
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
 
-    return () => clearInterval(interval);
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+          console.log("📡 WebSocket connected for real-time updates");
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "content_status") {
+              // Update content item in place
+              setContent(prev => prev.map(item => 
+                item.id === data.content_id 
+                  ? { ...item, status: data.status, stage: data.stage }
+                  : item
+              ));
+            }
+          } catch (e) {
+            console.warn("Failed to parse WebSocket message", e);
+          }
+        };
+        
+        ws.onclose = () => {
+          console.log("WebSocket disconnected, reconnecting in 3s...");
+          reconnectTimeout = setTimeout(connect, 3000);
+        };
+        
+        ws.onerror = (error) => {
+          console.warn("WebSocket error:", error);
+        };
+      } catch (e) {
+        console.warn("WebSocket connection failed:", e);
+        // Fallback to polling if WebSocket fails
+        reconnectTimeout = setTimeout(connect, 5000);
+      }
+    };
+
+    connect();
+
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+    };
   }, [content]);
 
   const getIcon = (type: string) => {

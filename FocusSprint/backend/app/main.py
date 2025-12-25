@@ -93,6 +93,14 @@ app.include_router(
     tags=["ADHD Learning"]
 )
 
+# WebSocket for Real-Time Updates
+from app.api.v1 import websocket
+app.include_router(
+    websocket.router,
+    prefix="/ws",
+    tags=["WebSocket"]
+)
+
 # 3. Mount Static Files
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 

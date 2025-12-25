@@ -31,6 +31,16 @@ from app.services.chunking.video_chunk_compiler import compile_video_chunks
 
 logger = logging.getLogger("ContentProcessor")
 
+# WebSocket broadcast helper
+async def broadcast_status(user_id: int, content_id: int, status: str, stage: str = None):
+    """Broadcast content status update via WebSocket."""
+    try:
+        from app.api.v1.websocket import get_ws_manager
+        manager = get_ws_manager()
+        await manager.broadcast_content_update(user_id, content_id, status, stage)
+    except Exception as e:
+        logger.warning(f"WebSocket broadcast failed (non-fatal): {e}")
+
 
 class ContentProcessor:
     """
@@ -86,6 +96,9 @@ class ContentProcessor:
             content.processed_at = datetime.now(timezone.utc)
             content.error_message = None
             db.commit()
+            
+            # Broadcast status via WebSocket
+            await broadcast_status(content.user_id, content.id, "processing", "INITIALIZING")
 
             chunks: List[dict]
 
@@ -98,12 +111,14 @@ class ContentProcessor:
             }:
                 content.stage = "DOCUMENT_PIPELINE"
                 db.commit()
+                await broadcast_status(content.user_id, content.id, "processing", "DOCUMENT_PIPELINE")
 
                 chunks = await self._process_document(content)
 
             elif content.source_type == ContentSourceType.YOUTUBE:
                 content.stage = "VIDEO_PIPELINE"
                 db.commit()
+                await broadcast_status(content.user_id, content.id, "processing", "VIDEO_PIPELINE")
 
                 chunks = await self._process_video(content, db)
 
@@ -134,6 +149,9 @@ class ContentProcessor:
             content.processed_at = datetime.now(timezone.utc)
             content.error_message = None
             db.commit()
+            
+            # Broadcast completion via WebSocket
+            await broadcast_status(content.user_id, content.id, "completed", None)
             
             elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
             logger.info("⏱️ Total processing time: %.2fs", elapsed)
