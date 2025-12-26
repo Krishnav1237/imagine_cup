@@ -385,11 +385,25 @@ async def complete_chunk(
     
     db.commit()
     
+    # 12. Calculate Mystery Reward Tier (for frontend celebration)
+    from app.services.mystery_rewards import calculate_mystery_reward, to_api_response
+    
+    mystery_reward = calculate_mystery_reward(
+        base_coins=reward["base_coins"],
+        streak_bonus=reward.get("streak_bonus", 0) / 100,  # Convert percentage to decimal
+        difficulty_multiplier=1.0,
+        is_quiz_correct=completion_data.quiz_score >= 80
+    )
+    mystery_response = to_api_response(mystery_reward)
+    
     logger.info(f"✅ Chunk {chunk_id} complete. Coins: +{reward['total_coins']}, Total Balance: {current_user.focus_coins}, Streak: {current_user.current_streak}")
     
     return {
         "status": "success",
-        "coins_earned": reward["total_coins"],
+        "coins_earned": mystery_reward.final_coins,
+        "base_coins": reward["base_coins"],
+        "multiplier": mystery_reward.multiplier,
+        "reward_tier": mystery_reward.tier.value,
         "reward_breakdown": reward,
         "new_balance": current_user.focus_coins,
         "streak": {
@@ -403,6 +417,12 @@ async def complete_chunk(
         "session_stats": {
             "chunks_completed": session.total_chunks_viewed,
             "total_time_seconds": session.total_duration_seconds,
-            "average_attention": round(session.average_attention_score, 2) if session.average_attention_score else 0
-        }
+            "average_attention": round(session.average_attention_score, 2) if session.average_attention_score else None
+        },
+        # Mystery reward data for frontend celebration
+        "mystery_reward": mystery_response,
+        "message": mystery_reward.message,
+        "bonus_item": mystery_reward.bonus_item,
+        "celebration_level": mystery_reward.celebration_level,
+        "is_jackpot": mystery_reward.tier.value == "legendary",
     }

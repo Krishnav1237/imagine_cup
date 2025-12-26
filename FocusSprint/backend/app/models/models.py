@@ -15,7 +15,13 @@ class User(Base):
     full_name = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     
-    # Preferences
+    # User Preferences (JSON blob for flexibility)
+    # Contains: ageGroup, focusStyle, sessionLength, motivationStyle,
+    # displayMode, visualAids, soundEffects, feature toggles, etc.
+    preferences = Column(JSON, nullable=True, default={})
+    onboarding_completed = Column(Boolean, default=False)
+    
+    # Legacy preferences (kept for backward compatibility)
     default_chunk_length = Column(Integer, default=5)
     preferred_difficulty = Column(String, default="medium")
     

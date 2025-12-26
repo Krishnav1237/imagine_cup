@@ -93,6 +93,14 @@ app.include_router(
     tags=["ADHD Learning"]
 )
 
+# User Preferences API
+from app.api.v1 import preferences
+app.include_router(
+    preferences.router,
+    prefix=f"{settings.API_V1_PREFIX}/preferences",
+    tags=["Preferences"]
+)
+
 # WebSocket for Real-Time Updates
 from app.api.v1 import websocket
 app.include_router(
