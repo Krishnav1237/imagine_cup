@@ -1,210 +1,215 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { Play, Upload, Youtube, FileText, Presentation } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { AppNav } from "@/components/app-nav";
-import { useUser } from "@/lib/user-context";
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { motion } from "framer-motion";
+import { Play, Plus, Clock, MoreVertical, FileText, Youtube, Presentation } from "lucide-react";
+import { AppNav } from "@/components/app-nav";
+import { Button } from "@/components/ui/button";
 
-export default function DashboardPage() {
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+interface ContentItem {
+  id: number;
+  title: string;
+  source_type: "youtube" | "pdf" | "pptx";
+  status: "pending" | "processing" | "completed" | "failed";
+  stage?: string | null;
+  created_at: string;
+}
+
+export default function Dashboard() {
+  const [content, setContent] = useState<ContentItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
-  const { currentProgress, completedSprints } = useUser();
-  const [greeting, setGreeting] = useState("Good evening");
-  const [userName, setUserName] = useState("Learner");
 
+  // 🔹 EXISTING useEffect (DO NOT MOVE)
   useEffect(() => {
-    const hour = new Date().getHours();
-    if (hour < 12) setGreeting("Good morning");
-    else if (hour < 18) setGreeting("Good afternoon");
-    else setGreeting("Good evening");
+    const fetchContent = async () => {
+      const token = localStorage.getItem("focus_token");
+      if (!token) {
+        router.push("/signin");
+        return;
+      }
 
-    const savedName = localStorage.getItem("focusflow_username");
-    if (savedName) setUserName(savedName);
-  }, []);
+      try {
+        const res = await fetch(`${API_URL}/content/library`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setContent(data.items ?? data); // depending on backend response
+        }
+      } catch (error) {
+        console.error("Failed to load content", error);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const focusRingProgress = completedSprints.length % 7;
+    fetchContent();
+  }, [router]);
+
+  // 🔹 WebSocket for real-time content updates
+  useEffect(() => {
+    const token = localStorage.getItem("focus_token");
+    if (!token) return;
+    
+    const hasProcessing = content.some(c => c.status === "processing");
+    if (!hasProcessing) return;
+
+    // Build WebSocket URL
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const apiHost = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/^https?:\/\//, "").replace(/\/api\/v1$/, "");
+    const wsUrl = `${wsProtocol}//${apiHost}/ws/content-status?token=${token}`;
+    
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
+
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+          console.log("📡 WebSocket connected for real-time updates");
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "content_status") {
+              // Update content item in place
+              setContent(prev => prev.map(item => 
+                item.id === data.content_id 
+                  ? { ...item, status: data.status, stage: data.stage }
+                  : item
+              ));
+            }
+          } catch (e) {
+            console.warn("Failed to parse WebSocket message", e);
+          }
+        };
+        
+        ws.onclose = () => {
+          console.log("WebSocket disconnected, reconnecting in 3s...");
+          reconnectTimeout = setTimeout(connect, 3000);
+        };
+        
+        ws.onerror = (error) => {
+          console.warn("WebSocket error:", error);
+        };
+      } catch (e) {
+        console.warn("WebSocket connection failed:", e);
+        // Fallback to polling if WebSocket fails
+        reconnectTimeout = setTimeout(connect, 5000);
+      }
+    };
+
+    connect();
+
+    return () => {
+      if (ws) {
+        ws.close();
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+    };
+  }, [content]);
+
+  const getIcon = (type: string) => {
+    switch (type) {
+      case "youtube": return <Youtube className="w-6 h-6 text-[#ff6b4a]" />;
+      case "pdf": return <FileText className="w-6 h-6 text-[#7c3aed]" />;
+      case "pptx": return <Presentation className="w-6 h-6 text-[#06b6d4]" />;
+      default: return <FileText className="w-6 h-6" />;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#0a0a12] text-white">
       <AppNav />
-
-      <div className="pt-32 pb-20 px-6">
-        <div className="max-w-4xl mx-auto">
-          {/* Greeting */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="mb-12"
-          >
-            <h1 className="text-4xl md:text-5xl font-bold mb-2">
-              {greeting}, <span className="gradient-text">{userName}</span>
-            </h1>
-          </motion.div>
-
-          {/* Continue Learning Section */}
-          {currentProgress && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.1 }}
-              className="mb-8"
-            >
-              <button
-                onClick={() => router.push("/sprint")}
-                className="w-full glass rounded-3xl p-8 hover:border-white/20 transition-all group text-left"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-[#ff6b4a]/20 flex items-center justify-center group-hover:scale-110 transition-transform">
-                      <Play className="w-6 h-6 text-[#ff6b4a]" />
-                    </div>
-                    <div>
-                      <h2 className="text-2xl font-bold">Continue Learning</h2>
-                      <p className="text-[#8888a0]">
-                        Last topic: {currentProgress.sprints[currentProgress.currentSprintIndex]?.concept}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-3xl font-bold text-[#ff6b4a]">
-                      {Math.ceil((currentProgress.totalSprints - currentProgress.currentSprintIndex) * 5 / 60)}m
-                    </div>
-                    <div className="text-sm text-[#8888a0]">left</div>
-                  </div>
-                </div>
-                <div className="h-2 bg-[#1e1e2e] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-[#ff6b4a] to-[#f59e0b]"
-                    style={{
-                      width: `${(currentProgress.currentSprintIndex / currentProgress.totalSprints) * 100}%`,
-                    }}
-                  />
-                </div>
-              </button>
-            </motion.div>
-          )}
-
-          {/* Today's Focus - GitHub Style Heatmap */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.2 }}
-            className="glass rounded-3xl p-8 mb-8"
-          >
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-semibold">Your Focus Activity</h3>
-              <div className="text-sm text-[#8888a0]">
-                {completedSprints.length} sessions this week
-              </div>
-            </div>
-            
-            {/* GitHub-style contribution graph */}
-            <div className="space-y-2">
-              <div className="flex gap-2 items-end">
-                <div className="flex flex-col gap-1 text-xs text-[#8888a0] justify-between" style={{height: '91px'}}>
-                  <span>Mon</span>
-                  <span>Wed</span>
-                  <span>Fri</span>
-                </div>
-                <div className="flex-1 grid grid-cols-53 gap-[3px]">
-                  {[...Array(371)].map((_, i) => {
-                    const dayOffset = 370 - i;
-                    // Only show activity on today's square (last square) based on completed sprints
-                    // In the future, this should track actual dates from sprint completion timestamps
-                    const isToday = dayOffset === 0;
-                    const activity = isToday ? completedSprints.length : 0;
-                    const intensity = activity === 0 ? 0 : activity <= 2 ? 1 : activity <= 4 ? 2 : activity <= 6 ? 3 : 4;
-                    
-                    return (
-                      <div
-                        key={i}
-                        className={`w-[10px] h-[10px] rounded-[2px] transition-all hover:ring-1 hover:ring-white/50 cursor-pointer ${
-                          intensity === 0
-                            ? "bg-[#161b22]"
-                            : intensity === 1
-                            ? "bg-[#0e4429]"
-                            : intensity === 2
-                            ? "bg-[#006d32]"
-                            : intensity === 3
-                            ? "bg-[#26a641]"
-                            : "bg-[#39d353]"
-                        }`}
-                        title={`${activity} sessions ${dayOffset} days ago`}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="flex items-center justify-end gap-2 mt-4 text-xs text-[#8888a0]">
-                <span>Less</span>
-                <div className="flex gap-[3px]">
-                  <div className="w-[10px] h-[10px] bg-[#161b22] rounded-[2px]" />
-                  <div className="w-[10px] h-[10px] bg-[#0e4429] rounded-[2px]" />
-                  <div className="w-[10px] h-[10px] bg-[#006d32] rounded-[2px]" />
-                  <div className="w-[10px] h-[10px] bg-[#26a641] rounded-[2px]" />
-                  <div className="w-[10px] h-[10px] bg-[#39d353] rounded-[2px]" />
-                </div>
-                <span>More</span>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Add New Content */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.3 }}
-            className="glass rounded-3xl p-8"
-          >
-            <h3 className="text-xl font-semibold mb-6">Add New Content</h3>
-
-            <div className="space-y-4">
-              <Link href="/upload" className="block">
-                <button className="w-full p-6 rounded-xl bg-[#1e1e2e] border border-[#2a2a3e] hover:border-white/20 transition-all text-left group">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-xl bg-[#ff6b4a]/20 flex items-center justify-center group-hover:scale-110 transition-transform">
-                      <Youtube className="w-6 h-6 text-[#ff6b4a]" />
-                    </div>
-                    <div>
-                      <div className="font-semibold mb-1">Paste YouTube URL</div>
-                      <div className="text-sm text-[#8888a0]">
-                        We'll break it into focus-sized chunks
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              </Link>
-
-              <Link href="/upload" className="block">
-                <button className="w-full p-6 rounded-xl bg-[#1e1e2e] border border-[#2a2a3e] hover:border-white/20 transition-all text-left group">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-xl bg-[#7c3aed]/20 flex items-center justify-center group-hover:scale-110 transition-transform">
-                      <Upload className="w-6 h-6 text-[#7c3aed]" />
-                    </div>
-                    <div>
-                      <div className="font-semibold mb-1">Upload File</div>
-                      <div className="text-sm text-[#8888a0] flex gap-2">
-                        <span className="flex items-center gap-1">
-                          <FileText className="w-3 h-3" /> PDF
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Presentation className="w-3 h-3" /> PPT
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <FileText className="w-3 h-3" /> DOC
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              </Link>
-            </div>
-          </motion.div>
+      <div className="pt-32 px-6 pb-20 max-w-7xl mx-auto">
+        
+        {/* Header */}
+        <div className="flex items-center justify-between mb-10">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">My Library</h1>
+            <p className="text-[#8888a0]">Continue your learning sprints</p>
+          </div>
+          <Link href="/upload">
+            <Button className="bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold rounded-xl">
+              <Plus className="w-4 h-4 mr-2" />
+              New Sprint
+            </Button>
+          </Link>
         </div>
+
+        {/* Content Grid */}
+        {loading ? (
+          <div className="text-center py-20 text-[#8888a0]">Loading your library...</div>
+        ) : content.length === 0 ? (
+          <div className="text-center py-20 border border-dashed border-[#2a2a3e] rounded-3xl bg-[#13131f]/50">
+            <p className="text-[#8888a0] mb-4">You haven't uploaded any content yet.</p>
+            <Link href="/upload">
+              <Button variant="outline" className="border-[#2a2a3e] text-white hover:bg-[#2a2a3e]">
+                Start your first Sprint
+              </Button>
+            </Link>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {content.map((item, i) => (
+              <motion.div
+                key={item.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.05 }}
+                className="group relative bg-[#13131f] border border-[#2a2a3e] hover:border-[#ff6b4a]/50 rounded-2xl p-5 transition-all hover:shadow-xl hover:shadow-[#ff6b4a]/5"
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <div className="p-3 bg-[#0a0a12] rounded-xl border border-[#2a2a3e] group-hover:border-[#ff6b4a]/30 transition-colors">
+                    {getIcon(item.source_type)}
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded-md font-medium ${
+                    item.status === 'completed' ? 'bg-green-500/10 text-green-400' :
+                    item.status === 'processing' ? 'bg-yellow-500/10 text-yellow-400' :
+                    'bg-red-500/10 text-red-400'
+                  }`}>
+                    {item.status === "processing"
+                      ? item.stage ?? "PROCESSING"
+                      : item.status.toUpperCase()}
+
+                  </span>
+                </div>
+
+                <h3 className="font-semibold text-lg mb-2 line-clamp-2 min-h-[3.5rem]">
+                  {item.title}
+                </h3>
+
+                <div className="flex items-center text-xs text-[#8888a0] mb-6">
+                  <Clock className="w-3 h-3 mr-1" />
+                  {new Date(item.created_at).toLocaleDateString()}
+                </div>
+
+                {item.status === 'completed' ? (
+                  <Link href={`/sprint?id=${item.id}`} className="block">
+                    <Button className="w-full bg-[#1e1e2e] hover:bg-[#ff6b4a] hover:text-[#0a0a12] text-white border border-[#2a2a3e] hover:border-[#ff6b4a] transition-all rounded-xl">
+                      <Play className="w-4 h-4 mr-2" />
+                      Resume Sprint
+                    </Button>
+                  </Link>
+                ) : (
+                  <Button disabled className="w-full bg-[#1e1e2e] text-[#8888a0] border border-[#2a2a3e] rounded-xl opacity-50 cursor-not-allowed">
+                    {item.stage ? item.stage.replace("_", " ") : "Processing..."}
+                  </Button>
+                )}
+              </motion.div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

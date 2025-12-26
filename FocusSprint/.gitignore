@@ -36,3 +36,79 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# =========================
+# General
+# =========================
+.DS_Store
+Thumbs.db
+*.log
+
+# =========================
+# Environment files
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Node / Next.js
+# =========================
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# Lockfiles (keep only one)
+bun.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# =========================
+# Frontend artifacts
+# =========================
+FocusSprint_code.zip
+tree.txt
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# =========================
+# Python virtual environments
+# =========================
+venv/
+.env/
+.envrc/
+
+# =========================
+# Backend specific
+# =========================
+backend/venv/
+backend/__pycache__/
+backend/data/
+backend/uploads/
+backend/*.db
+
+# =========================
+# Editor / IDE
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS / tooling
+# =========================
+.cache/
+coverage/
+pytest_cache/

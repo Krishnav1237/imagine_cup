@@ -1,599 +1,423 @@
 "use client";
 
-import { motion, AnimatePresence } from "framer-motion";
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
-import {
-  Eye,
-  EyeOff,
-  Play,
-  Pause,
-  Clock,
-  Target,
-  Coins,
-  Sparkles,
-  ChevronRight,
-  Trophy,
-  Home,
-} from "lucide-react";
+import { useEffect, useState, Suspense, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { motion } from "framer-motion";
+import { ArrowRight, Trophy, PlayCircle, Coins, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useUser } from "@/lib/user-context";
-import { Progress } from "@/components/ui/progress";
+import { AppNav } from "@/components/app-nav";
 
-export default function SprintPage() {
+// ADHD Components
+import { VisualTimer } from "@/components/ui/visual-timer";
+import { HyperfocusGuard } from "@/components/hyperfocus-guard";
+import { AttentionOverlay } from "@/components/attention-overlay";
+import { MicroCommitmentPrompt, MicroContinuePrompt, useMicroCommitment } from "@/components/micro-commitment";
+import { RewardReveal } from "@/components/reward-reveal";
+import { useFrustrationDetector, getRandomIntervention } from "@/hooks/use-frustration-detector";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+interface QuizQuestion {
+  question: string;
+  options: string[];
+  correct_answer: number;
+  explanation: string;
+}
+
+interface Chunk {
+  id: number;
+  title: string;
+  summary?: string;
+  text_content?: string;
+  duration_seconds?: number;
+  sequence_number: number;
+  key_concepts?: string[];
+  quiz_questions?: QuizQuestion[];
+  generation_model?: string;
+  generation_strategy?: string;
+}
+
+interface ContentDetail {
+  id: number;
+  title: string;
+  source_type: string;
+  source_url?: string;
+  chunks: Chunk[];
+}
+
+interface MysteryReward {
+  tier: string;
+  tier_display: string;
+  base_coins: number;
+  multiplier: number;
+  final_coins: number;
+  bonus_item: string | null;
+  message: string;
+  celebration_level: number;
+  is_jackpot: boolean;
+  show_mystery_animation: boolean;
+}
+
+function SprintContent() {
+  const searchParams = useSearchParams();
   const router = useRouter();
-  const { currentProgress, addCoins, completeSprint, incrementStreak, focusCoins, streak, setProgress, isLoaded } = useUser();
-  const [isLooking, setIsLooking] = useState(true);
+  const contentId = searchParams.get("id");
+  const { addCoins } = useUser();
+
+  // Core state
+  const [content, setContent] = useState<ContentDetail | null>(null);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [authMissing, setAuthMissing] = useState(false);
+  
+  // Timer state
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
-  const [timeElapsed, setTimeElapsed] = useState(0);
-  const [sprintPhase, setSprintPhase] = useState<'video' | 'infographic' | 'quiz'>('video');
-  const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
-  const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
-  const [earnedCoins, setEarnedCoins] = useState(0);
-  const [focusTime, setFocusTime] = useState(0);
-  const [distractionCount, setDistractionCount] = useState(0);
-  const [showMicroRecap, setShowMicroRecap] = useState(false);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const lastLookingStateRef = useRef(true);
+  
+  // ADHD Feature state
+  const [showReward, setShowReward] = useState(false);
+  const [currentReward, setCurrentReward] = useState<MysteryReward | null>(null);
+  const [showFrustrationPrompt, setShowFrustrationPrompt] = useState(false);
+  const [attentionEnabled, setAttentionEnabled] = useState(true);
+  
+  // Micro-commitment hook
+  const {
+    showPrompt,
+    isMicroMode,
+    showContinue,
+    startMicro,
+    startFull,
+    completeMicro,
+    continueSession,
+    endSession,
+  } = useMicroCommitment();
+  
+  // Frustration detection
+  const frustrationMetrics = useFrustrationDetector({
+    enabled: !showPrompt,
+    onFrustrationDetected: () => {
+      setShowFrustrationPrompt(true);
+      setTimeout(() => setShowFrustrationPrompt(false), 8000);
+    },
+  });
 
-  const currentSprint = currentProgress?.sprints[currentProgress.currentSprintIndex];
-  const sprintDuration = 300;
-
+  // Fetch content data
   useEffect(() => {
-    if (isLoaded && !currentProgress) {
-      router.push("/upload");
-      return;
-    }
-  }, [currentProgress, router, isLoaded]);
-
-  useEffect(() => {
-    if (!isPaused && isLooking && timeElapsed < sprintDuration) {
-      timerRef.current = setInterval(() => {
-        setTimeElapsed((prev) => {
-          const next = prev + 1;
-          if (next >= sprintDuration) {
-            handleSprintComplete();
-            return sprintDuration;
-          }
-          return next;
+    if (!contentId) return;
+    const fetchData = async () => {
+      const token = localStorage.getItem("focus_token");
+      if (!token) {
+        setAuthMissing(true);
+        router.push("/signin");
+        return;
+      }
+      try {
+        const res = await fetch(`${API_URL}/content/${contentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
         });
-        setFocusTime((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-    }
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+        if (res.ok) {
+          const data = await res.json();
+          setContent(data);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
     };
-  }, [isPaused, isLooking, timeElapsed]);
-
+    fetchData();
+  }, [contentId, router]);
+  
+  // Timer
   useEffect(() => {
-    if (!isLooking) {
-      setIsPaused(true);
-      
-      // Track distraction and show Micro-Recap after 3 look-aways
-      if (lastLookingStateRef.current === true) {
-        setDistractionCount(prev => {
-          const newCount = prev + 1;
-          if (newCount >= 3 && sprintPhase === 'video') {
-            setShowMicroRecap(true);
-          }
-          return newCount;
-        });
-      }
-    }
-    lastLookingStateRef.current = isLooking;
-  }, [isLooking, sprintPhase]);
-
-  const handleSprintComplete = () => {
-    setSprintPhase('infographic');
-    const focusPercentage = (focusTime / sprintDuration) * 100;
-    let coins = 50;
-    if (focusPercentage >= 90) coins += 25;
-    if (streak >= 2) coins *= 2;
-    setEarnedCoins(coins);
-  };
-
-  const handleAnswerSubmit = () => {
-    if (selectedAnswer === null) return;
-    const correct = selectedAnswer === 1;
-    setIsCorrect(correct);
+    if (showPrompt || isPaused) return;
     
-    setTimeout(() => {
-      if (correct) {
-        addCoins(earnedCoins + 10);
-        incrementStreak();
-      } else {
-        addCoins(earnedCoins);
-      }
-      
-      if (currentSprint) {
-        completeSprint({
-          ...currentSprint,
-          completed: true,
-        });
-      }
+    const timer = setInterval(() => {
+      setElapsedSeconds(prev => prev + 1);
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, [showPrompt, isPaused]);
+  
+  // Check for micro mode completion
+  useEffect(() => {
+    if (isMicroMode && elapsedSeconds >= 30) {
+      completeMicro();
+    }
+  }, [isMicroMode, elapsedSeconds, completeMicro]);
 
-      if (currentProgress && currentProgress.currentSprintIndex < currentProgress.totalSprints - 1) {
-        const updatedProgress = {
-          ...currentProgress,
-          currentSprintIndex: currentProgress.currentSprintIndex + 1,
+  const handleChunkComplete = async () => {
+    const token = localStorage.getItem("focus_token");
+    const simulatedAttention = Math.floor(Math.random() * (100 - 80 + 1) + 80);
+    
+    try {
+      const res = await fetch(`${API_URL}/content/${contentId}/chunks/${currentChunk.id}/complete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          quiz_score: 100,
+          average_attention: simulatedAttention,
+          time_spent_seconds: elapsedSeconds,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        
+        // Create mystery reward display (enhanced from API response)
+        const mysteryReward: MysteryReward = {
+          tier: data.reward_tier || "common",
+          tier_display: (data.reward_tier || "COMMON").toUpperCase(),
+          base_coins: data.base_coins || 10,
+          multiplier: data.multiplier || 1,
+          final_coins: data.coins_earned || 15,
+          bonus_item: data.bonus_item || null,
+          message: data.message || "Nice work! 🎯",
+          celebration_level: data.celebration_level || 1,
+          is_jackpot: data.is_jackpot || false,
+          show_mystery_animation: (data.reward_tier === "rare" || data.reward_tier === "epic" || data.reward_tier === "legendary"),
         };
-        setProgress(updatedProgress);
-        setTimeElapsed(0);
-        setFocusTime(0);
-        setSprintPhase('video');
-        setSelectedAnswer(null);
-        setIsCorrect(null);
-        setDistractionCount(0);
-      } else {
-        router.push("/session-end");
+        
+        setCurrentReward(mysteryReward);
+        setShowReward(true);
+        
+        if (data.coins_earned > 0) {
+          addCoins(data.coins_earned);
+        }
       }
-    }, 2000);
+    } catch (e) {
+      console.error("Failed to record progress", e);
+      // Still show a reward even if API fails
+      setCurrentReward({
+        tier: "common",
+        tier_display: "COMMON",
+        base_coins: 10,
+        multiplier: 1,
+        final_coins: 10,
+        bonus_item: null,
+        message: "Progress saved! 🎯",
+        celebration_level: 1,
+        is_jackpot: false,
+        show_mystery_animation: false,
+      });
+      setShowReward(true);
+    }
+  };
+  
+  const handleRewardClose = () => {
+    setShowReward(false);
+    setElapsedSeconds(0);
+    
+    if (isLastChunk) {
+      router.push("/session-end?id=" + contentId);
+    } else {
+      setCurrentChunkIndex(prev => prev + 1);
+    }
+  };
+  
+  const handleMicroContinue = () => {
+    continueSession();
+    setElapsedSeconds(0);
+  };
+  
+  const handleMicroEnd = () => {
+    endSession();
+    handleChunkComplete();
   };
 
-  if (!currentProgress || !currentSprint) {
-    return <div className="min-h-screen bg-[#0a0a12] flex items-center justify-center text-white">Loading...</div>;
+  if (authMissing) {
+    return (
+      <div className="min-h-screen bg-[#0a0a12] flex items-center justify-center text-white">
+        Redirecting to sign in...
+      </div>
+    );
   }
 
-  const progress = (timeElapsed / sprintDuration) * 100;
-  const focusPercentage = timeElapsed > 0 ? (focusTime / timeElapsed) * 100 : 100;
+  if (loading || !content) {
+    return (
+      <div className="min-h-screen bg-[#0a0a12] flex items-center justify-center text-white">
+        Loading Sprint...
+      </div>
+    );
+  }
+
+  const currentChunk = content.chunks[currentChunkIndex];
+  const isLastChunk = currentChunkIndex === content.chunks.length - 1;
+  const chunkDuration = isMicroMode ? 30 : (currentChunk.duration_seconds ?? 300);
+  const intervention = getRandomIntervention();
 
   return (
-    <div className="min-h-screen bg-[#0a0a12] text-white">
-      <div className="fixed top-0 left-0 right-0 z-50 glass">
-        <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <Button
-                onClick={() => router.push('/dashboard')}
-                variant="ghost"
-                size="sm"
-                className="text-[#8888a0] hover:text-white"
-              >
-                ← Home
-              </Button>
-              <div className="text-sm text-[#8888a0]">
-                Sprint {currentSprint.sprintNumber} of {currentSprint.totalSprints}
+    <HyperfocusGuard enabled={!showPrompt} thresholdMinutes={45}>
+      <AttentionOverlay 
+        enabled={attentionEnabled && !showPrompt} 
+        lookAwayThreshold={5}
+      >
+        <div className="min-h-screen bg-[#0a0a12] text-white flex flex-col">
+          <AppNav />
+
+          {/* Progress Bar */}
+          <div className="fixed top-[72px] left-0 right-0 h-1 bg-[#1e1e2e] z-40">
+            <motion.div
+              className="h-full bg-[#ff6b4a]"
+              initial={{ width: 0 }}
+              animate={{ width: `${((currentChunkIndex) / content.chunks.length) * 100}%` }}
+            />
+          </div>
+
+          <main className="flex-1 flex flex-col pt-24 px-6 max-w-5xl mx-auto w-full pb-10">
+            {/* Header */}
+            <header className="mb-8 flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-[#8888a0] mb-2 text-sm">
+                  <span>{content.title}</span>
+                  <span>•</span>
+                  <span>Sprint {currentChunk.sequence_number} of {content.chunks.length}</span>
+                  {isMicroMode && (
+                    <span className="ml-2 px-2 py-0.5 bg-[#ff6b4a]/20 text-[#ff6b4a] text-xs rounded-full">
+                      ⚡ MICRO MODE
+                    </span>
+                  )}
+                </div>
+                <h1 className="text-3xl font-bold">{currentChunk.title}</h1>
               </div>
-              <div className="text-sm font-semibold text-white">{currentSprint.concept}</div>
+              
+              {/* Visual Timer */}
+              <VisualTimer
+                duration={chunkDuration}
+                elapsed={elapsedSeconds}
+                isPaused={isPaused}
+                size={100}
+                showComparison={true}
+              />
+            </header>
+
+            {/* Content Area */}
+            <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-8">
+              {/* Left: Main Content */}
+              <div className="lg:col-span-2 space-y-6">
+                <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl overflow-hidden aspect-video relative group">
+                  {content.source_type === "youtube" ? (
+                    <div className="w-full h-full flex items-center justify-center bg-black/50">
+                      <PlayCircle className="w-16 h-16 text-white/50 group-hover:text-[#ff6b4a] transition-colors" />
+                      <p className="absolute bottom-4 text-sm text-white/70">
+                        Video Sync active for timestamp {currentChunk.sequence_number * 5}:00
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="p-8 h-full overflow-y-auto">
+                      <p className="whitespace-pre-wrap text-lg leading-relaxed text-[#d4d4d8]">
+                        {currentChunk.text_content || currentChunk.summary}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl p-6">
+                  <h3 className="font-semibold mb-3 flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-[#f59e0b]" />
+                    Key Concepts
+                  </h3>
+                  <div className="flex flex-wrap gap-2">
+                    {currentChunk.key_concepts?.length
+                      ? currentChunk.key_concepts.map((concept, i) => (
+                          <span
+                            key={i}
+                            className="px-3 py-1 bg-[#1e1e2e] rounded-full text-sm border border-[#2a2a3e] text-[#8888a0]"
+                          >
+                            {concept}
+                          </span>
+                        ))
+                      : <span className="text-sm text-[#8888a0]">No key concepts</span>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: Interaction / Summary */}
+              <div className="space-y-6">
+                <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl p-6 h-full flex flex-col">
+                  <h3 className="text-xl font-bold mb-4">Summary</h3>
+                  <p className="text-[#8888a0] leading-relaxed mb-8 flex-1">
+                    {currentChunk.summary}
+                  </p>
+
+                  {/* Coins preview */}
+                  <div className="flex items-center gap-2 mb-4 text-[#f59e0b]">
+                    <Coins className="w-5 h-5" />
+                    <span className="font-semibold">~10-50 coins</span>
+                    <Zap className="w-4 h-4 ml-2" />
+                    <span className="text-xs text-[#8888a0]">Mystery reward!</span>
+                  </div>
+
+                  <Button
+                    onClick={handleChunkComplete}
+                    className="w-full h-14 bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-bold text-lg rounded-xl"
+                  >
+                    {isLastChunk ? "Complete Sprint" : "Next Sprint"} <ArrowRight className="ml-2" />
+                  </Button>
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-4">
-              {sprintPhase === 'video' && (
+          </main>
+          
+          {/* Micro-Commitment Prompt */}
+          <MicroCommitmentPrompt
+            title={content.title}
+            fullDuration={currentChunk.duration_seconds ?? 300}
+            onStartMicro={startMicro}
+            onStartFull={startFull}
+            isVisible={showPrompt}
+          />
+          
+          {/* Micro Continue Prompt */}
+          <MicroContinuePrompt
+            onContinue={handleMicroContinue}
+            onStop={handleMicroEnd}
+            coinsEarned={10}
+            isVisible={showContinue}
+          />
+          
+          {/* Reward Reveal */}
+          <RewardReveal
+            reward={currentReward}
+            isVisible={showReward}
+            onClose={handleRewardClose}
+          />
+          
+          {/* Frustration Intervention */}
+          {showFrustrationPrompt && (
+            <motion.div
+              className="fixed bottom-20 left-1/2 z-50 transform -translate-x-1/2"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+            >
+              <div className="glass rounded-2xl px-6 py-4 max-w-sm text-center">
+                <p className="text-white mb-2">{intervention.message}</p>
                 <Button
-                  onClick={() => {
-                    setSprintPhase('infographic');
-                    if (timerRef.current) clearInterval(timerRef.current);
-                  }}
+                  onClick={() => setShowFrustrationPrompt(false)}
                   variant="outline"
                   size="sm"
-                  className="border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#2a2a3e] text-xs"
+                  className="border-[#2a2a3e] text-white"
                 >
-                  Skip to Next →
-                </Button>
-              )}
-              {streak > 0 && (
-                <div className="glass px-3 py-2 rounded-full text-sm">
-                  🔥 {streak}x
-                </div>
-              )}
-              <div className="flex items-center gap-2 glass px-4 py-2 rounded-full">
-                <Coins className="w-4 h-4 text-[#f59e0b]" />
-                <span className="font-semibold">{focusCoins}</span>
-              </div>
-            </div>
-          </div>
-          <div className="mt-3">
-            <Progress value={progress} className="h-2" />
-          </div>
-        </div>
-      </div>
-
-      {/* Micro-Recap Modal for Distraction */}
-      <AnimatePresence>
-        {showMicroRecap && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center px-6"
-            onClick={() => setShowMicroRecap(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.9, y: 20 }}
-              className="glass rounded-3xl p-8 max-w-2xl w-full"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 rounded-xl bg-[#06b6d4]/20 flex items-center justify-center">
-                  <Sparkles className="w-6 h-6 text-[#06b6d4]" />
-                </div>
-                <div>
-                  <h3 className="text-2xl font-bold">Quick Recap</h3>
-                  <p className="text-sm text-[#8888a0]">Let's get you back on track</p>
-                </div>
-              </div>
-              
-              <div className="space-y-4 mb-6">
-                <div className="p-4 rounded-xl bg-[#1e1e2e] border border-[#2a2a3e]">
-                  <h4 className="font-semibold mb-2 text-[#06b6d4]">Main Concept</h4>
-                  <p className="text-[#8888a0]">{currentSprint?.concept}</p>
-                </div>
-                <div className="p-4 rounded-xl bg-[#1e1e2e] border border-[#2a2a3e]">
-                  <h4 className="font-semibold mb-2 text-[#7c3aed]">Key Points</h4>
-                  <ul className="list-disc list-inside space-y-1 text-[#8888a0]">
-                    <li>Core definition and purpose</li>
-                    <li>Real-world application</li>
-                    <li>Common misconceptions</li>
-                  </ul>
-                </div>
-              </div>
-              
-              <div className="flex gap-3">
-                <Button
-                  onClick={() => {
-                    setShowMicroRecap(false);
-                    setDistractionCount(0);
-                  }}
-                  className="flex-1 bg-[#06b6d4] hover:bg-[#06b6d4]/80 text-[#0a0a12]"
-                >
-                  Got it, continue
-                </Button>
-                <Button
-                  onClick={() => {
-                    setShowMicroRecap(false);
-                    setTimeElapsed(Math.max(0, timeElapsed - 60));
-                    setDistractionCount(0);
-                  }}
-                  variant="outline"
-                  className="flex-1 border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#2a2a3e]"
-                >
-                  Explain differently
+                  {intervention.action}
                 </Button>
               </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          )}
+        </div>
+      </AttentionOverlay>
+    </HyperfocusGuard>
+  );
+}
 
-      <AnimatePresence mode="wait">
-        {sprintPhase === 'video' ? (
-          <motion.div
-            key="video"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="pt-32 pb-12 px-6"
-          >
-            <div className="max-w-7xl mx-auto flex gap-6">
-              <div className="flex-1 flex flex-col gap-6">
-                <div
-                  className={`relative flex-1 rounded-2xl overflow-hidden transition-all duration-500 ${
-                    !isLooking ? "blur-md" : ""
-                  }`}
-                  style={{
-                    backgroundImage: currentSprint.infographic ? `url(${currentSprint.infographic})` : "none",
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
-                    minHeight: "500px",
-                  }}
-                >
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
-                  <div className="absolute bottom-6 left-6 right-6">
-                    <h2 className="text-2xl font-bold mb-2">{currentSprint.concept}</h2>
-                    <div className="flex items-center gap-4 text-sm text-[#8888a0]">
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4" />
-                        {Math.floor((sprintDuration - timeElapsed) / 60)}:
-                        {String((sprintDuration - timeElapsed) % 60).padStart(2, "0")} remaining
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Target className="w-4 h-4" />
-                        {focusPercentage.toFixed(0)}% focus
-                      </div>
-                    </div>
-                  </div>
-
-                  {!isLooking && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
-                      <EyeOff className="w-16 h-16 text-[#ff6b4a] mb-4" />
-                      <p className="text-xl font-semibold mb-2">Look at the screen to continue</p>
-                      <p className="text-[#8888a0]">Sprint paused due to distraction</p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex gap-4 mb-4">
-                  <Button
-                    onClick={() => setIsLooking(!isLooking)}
-                    variant="outline"
-                    className="flex-1 border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#2a2a3e]"
-                  >
-                    {isLooking ? "Simulate Looking Away" : "Simulate Looking Back"}
-                  </Button>
-                  <Button
-                    onClick={() => setIsPaused(!isPaused)}
-                    variant="outline"
-                    className="px-8 border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#2a2a3e]"
-                  >
-                    {isPaused ? <Play className="w-5 h-5" /> : <Pause className="w-5 h-5" />}
-                  </Button>
-                </div>
-
-                {/* Adaptive Complexity Controls */}
-                <div className="grid grid-cols-3 gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#7c3aed]/20 hover:border-[#7c3aed] text-xs"
-                    onClick={() => {/* Make shorter logic */}}
-                  >
-                    Make shorter
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#06b6d4]/20 hover:border-[#06b6d4] text-xs"
-                    onClick={() => {/* Show example logic */}}
-                  >
-                    Show example
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="border-[#2a2a3e] bg-[#1e1e2e] hover:bg-[#f59e0b]/20 hover:border-[#f59e0b] text-xs"
-                    onClick={() => {/* Pause & recap logic */}}
-                  >
-                    Pause & recap
-                  </Button>
-                </div>
-              </div>
-
-              <div className="w-80 space-y-6">
-                <div className="glass rounded-2xl p-6">
-                  <div className="flex items-center gap-3 mb-4">
-                    <Eye className={`w-6 h-6 ${isLooking ? "text-[#10b981]" : "text-[#ff6b4a]"}`} />
-                    <div>
-                      <div className="text-sm text-[#8888a0]">Eye Tracking</div>
-                      <div className={`text-lg font-semibold ${isLooking ? "text-[#10b981]" : "text-[#ff6b4a]"}`}>
-                        {isLooking ? "Focused" : "Distracted"}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="h-2 bg-[#1e1e2e] rounded-full overflow-hidden">
-                    <motion.div
-                      className="h-full bg-gradient-to-r from-[#10b981] to-[#06b6d4]"
-                      style={{ width: `${focusPercentage}%` }}
-                      transition={{ duration: 0.3 }}
-                    />
-                  </div>
-                  <p className="text-xs text-[#8888a0] mt-2">
-                    {isLooking
-                      ? "Great job staying focused!"
-                      : "Look back at the screen to earn full rewards"}
-                  </p>
-                </div>
-
-                <div className="glass rounded-2xl p-6">
-                  <div className="flex items-center gap-2 mb-4">
-                    <Target className="w-5 h-5 text-[#7c3aed]" />
-                    <span className="font-semibold">Sprint Queue</span>
-                  </div>
-                  <div className="space-y-2">
-                    {currentProgress.sprints.slice(
-                      currentProgress.currentSprintIndex,
-                      currentProgress.currentSprintIndex + 3
-                    ).map((sprint, i) => (
-                      <div
-                        key={sprint.id}
-                        className={`p-3 rounded-lg text-sm ${
-                          i === 0
-                            ? "bg-[#7c3aed]/20 text-[#a78bfa] border border-[#7c3aed]/30"
-                            : "bg-[#1e1e2e] text-[#8888a0]"
-                        }`}
-                      >
-                        {i === 0 && <span className="text-xs text-[#7c3aed] font-semibold mr-2">NOW</span>}
-                        {sprint.concept}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="glass rounded-2xl p-6">
-                  <div className="flex items-center gap-2 mb-4">
-                    <Coins className="w-5 h-5 text-[#f59e0b]" />
-                    <span className="font-semibold">Potential Rewards</span>
-                  </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-[#8888a0]">Base reward</span>
-                      <span className="text-[#f59e0b] font-semibold">+50</span>
-                    </div>
-                    {focusPercentage >= 90 && (
-                      <div className="flex justify-between">
-                        <span className="text-[#8888a0]">Perfect focus bonus</span>
-                        <span className="text-[#10b981] font-semibold">+25</span>
-                      </div>
-                    )}
-                    {streak >= 2 && (
-                      <div className="flex justify-between">
-                        <span className="text-[#8888a0]">Streak multiplier</span>
-                        <span className="text-[#ff6b4a] font-semibold">×2</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        ) : sprintPhase === 'infographic' ? (
-          <motion.div
-            key="infographic"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="min-h-screen flex items-center justify-center px-6 pt-32"
-          >
-            <div className="max-w-4xl w-full">
-              <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.2 }}
-                className="text-center mb-8"
-              >
-                <div className="inline-flex items-center gap-2 glass px-4 py-2 rounded-full mb-4">
-                  <Sparkles className="w-4 h-4 text-[#f59e0b]" />
-                  <span className="text-sm text-[#8888a0]">Video Complete!</span>
-                </div>
-                <h2 className="text-4xl font-bold mb-2">
-                  <span className="gradient-text">{currentSprint.concept}</span>
-                </h2>
-                <p className="text-[#8888a0]">Here's a visual summary of what you just learned</p>
-              </motion.div>
-
-              <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.3 }}
-                className="glass rounded-3xl p-8 mb-6"
-              >
-                <div className="aspect-[16/9] rounded-2xl overflow-hidden mb-6 bg-gradient-to-br from-[#7c3aed]/20 to-[#06b6d4]/20 flex items-center justify-center">
-                  {currentSprint.infographic ? (
-                    <img
-                      src={currentSprint.infographic}
-                      alt="Sprint infographic"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <div className="text-center p-12">
-                      <h3 className="text-3xl font-bold mb-4">{currentSprint.concept}</h3>
-                      <p className="text-[#8888a0] text-lg max-w-2xl">{currentSprint.summary}</p>
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-
-              <Button
-                onClick={() => setSprintPhase('quiz')}
-                className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold px-8 py-6 text-lg rounded-xl"
-              >
-                Take Quick Quiz
-                <ChevronRight className="w-5 h-5 ml-2" />
-              </Button>
-            </div>
-          </motion.div>
-        ) : (
-
-          <motion.div
-            key="quiz"
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="min-h-screen flex items-center justify-center px-6 pt-32"
-          >
-            <div className="max-w-3xl w-full">
-              <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.2 }}
-                className="text-center mb-8"
-              >
-                <div className="inline-flex items-center gap-2 glass px-4 py-2 rounded-full mb-4">
-                  <Target className="w-4 h-4 text-[#7c3aed]" />
-                  <span className="text-sm text-[#8888a0]">Knowledge Check</span>
-                </div>
-                <h2 className="text-3xl font-bold mb-2">Quick Quiz</h2>
-                <p className="text-[#8888a0]">Lock in what you just learned</p>
-              </motion.div>
-
-              <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.3 }}
-                className="glass rounded-3xl p-8 mb-6"
-              >
-                <h3 className="text-xl font-semibold mb-4">Quick Knowledge Check</h3>
-                <p className="text-[#8888a0] mb-6">
-                  What was the main concept covered in this sprint?
-                </p>
-                <div className="space-y-3">
-                  {[
-                    currentSprint.concept,
-                    "Something completely different",
-                    "Another random topic",
-                    "Not covered in this sprint",
-                  ].map((option, i) => (
-                    <button
-                      key={i}
-                      onClick={() => {
-                        if (isCorrect === null) setSelectedAnswer(i);
-                      }}
-                      disabled={isCorrect !== null}
-                      className={`w-full p-4 rounded-xl text-left transition-all ${
-                        selectedAnswer === i
-                          ? isCorrect === null
-                            ? "bg-[#7c3aed]/20 border border-[#7c3aed]"
-                            : isCorrect
-                            ? "bg-[#06b6d4]/20 border border-[#06b6d4]"
-                            : "bg-[#f59e0b]/20 border border-[#f59e0b]"
-                          : "bg-[#1e1e2e] border border-[#2a2a3e] hover:border-white/20"
-                      } ${isCorrect !== null ? "cursor-not-allowed" : ""}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span>{option}</span>
-                        {selectedAnswer === i && isCorrect !== null && (
-                          <div className="text-sm font-semibold">
-                            {isCorrect ? "You're on track ✓" : "Let's revisit this"}
-                          </div>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </motion.div>
-
-              <motion.div
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.5 }}
-                className="glass rounded-2xl p-6 mb-6"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-[#f59e0b]/20 flex items-center justify-center">
-                      <Trophy className="w-6 h-6 text-[#f59e0b]" />
-                    </div>
-                    <div>
-                      <div className="text-sm text-[#8888a0]">You earned</div>
-                      <div className="text-2xl font-bold text-[#f59e0b]">
-                        +{earnedCoins} {selectedAnswer === 1 && "+ 10 bonus"} Focus Coins
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-
-              <Button
-                onClick={handleAnswerSubmit}
-                disabled={selectedAnswer === null || isCorrect !== null}
-                className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold px-8 py-6 text-lg rounded-xl disabled:opacity-50"
-              >
-                {isCorrect === null ? (
-                  <>
-                    Continue to Next Sprint
-                    <ChevronRight className="w-5 h-5 ml-2" />
-                  </>
-                ) : (
-                  "Loading next sprint..."
-                )}
-              </Button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+export default function SprintPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#0a0a12] text-white flex items-center justify-center">Loading...</div>}>
+      <SprintContent />
+    </Suspense>
   );
 }

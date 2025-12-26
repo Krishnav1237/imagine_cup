@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Home, Play, BookOpen, BarChart3, Settings, Coins, Zap } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { useState } from "react";
+import { Home, Play, BookOpen, BarChart3, Settings, Coins, Zap, LogOut } from "lucide-react";
 import { useUser } from "@/lib/user-context";
 
 export function AppNav() {
   const pathname = usePathname();
-  const { focusCoins, streak } = useUser();
+  const router = useRouter();
+  const { focusCoins, streak, logout } = useUser();
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   const links = [
     { href: "/dashboard", icon: Home, label: "Home" },
@@ -57,6 +60,17 @@ export function AppNav() {
               🔥 {streak}
             </div>
           )}
+          <button
+            onClick={() => {
+              logout();
+              router.push("/splash");
+            }}
+            aria-label="Logout"
+            className="glass p-2 rounded-full hover:bg-white/5 transition-colors"
+            title="Logout"
+          >
+            <LogOut className="w-4 h-4 text-[#ff6b4a]" />
+          </button>
         </div>
       </div>
     </nav>

@@ -41,6 +41,7 @@ function Button({
   variant = "default",
   size = "default",
   asChild = false,
+  onClick,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
@@ -48,12 +49,23 @@ function Button({
   }) {
   const Comp = asChild ? Slot : "button"
 
+  const handleClick: React.MouseEventHandler<HTMLButtonElement> = (event) => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("fs-loading-start"))
+    }
+
+    if (onClick) {
+      onClick(event)
+    }
+  }
+
   return (
     <Comp
       data-slot="button"
       data-variant={variant}
       data-size={size}
       className={cn(buttonVariants({ variant, size, className }))}
+      onClick={handleClick}
       {...props}
     />
   )
