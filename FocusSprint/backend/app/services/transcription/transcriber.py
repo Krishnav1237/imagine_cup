@@ -1,207 +1,280 @@
 """
 Transcription service interface and implementations.
-Supports both Whisper (local) and Azure Speech Services.
+Supports timestamped transcription for video chaptering.
 """
+
 import logging
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, List, Dict
 from pathlib import Path
+import re
 
 from app.config import settings
 
 logger = logging.getLogger("Transcriber")
 
+# ==========================================================
+# Abstract interface
+# ==========================================================
 class Transcriber(ABC):
     """Abstract transcriber interface"""
-    
+
     @abstractmethod
     async def transcribe_audio(self, audio_path: str) -> Optional[str]:
-        """
-        Transcribe audio file to text.
-        """
         pass
 
+    @abstractmethod
+    async def transcribe_audio_with_timestamps(
+        self, audio_path: str
+    ) -> Optional[List[Dict]]:
+        pass
+
+
+# ==========================================================
+# Whisper (local, preferred)
+# ==========================================================
 class WhisperTranscriber(Transcriber):
-    """OpenAI Whisper transcriber (local)"""
-    
+    """Local Whisper transcriber"""
+
     def __init__(self):
         self.model = None
         self._load_model()
-    
+
     def _load_model(self):
-        """Lazy load Whisper model."""
         try:
             import whisper
-            # Use 'base' model for balance of speed and accuracy
-            logger.info("⏳ Loading Whisper model 'base'...")
+            logger.info("⏳ Loading Whisper model (base)")
             self.model = whisper.load_model("base")
-            logger.info("✅ Whisper model loaded successfully")
+            logger.info("✅ Whisper model loaded")
         except Exception as e:
-            logger.error(f"⚠️ Warning: Could not load Whisper model: {e}")
-    
-    async def transcribe_audio(self, audio_path: str) -> Optional[str]:
-        """Transcribe audio using Whisper"""
-        if not self.model:
-            logger.error("Whisper model not loaded")
-            return None
-        
-        try:
-            # Get actual file path from storage
-            from app.services.storage.adapter import get_storage_adapter
-            storage = get_storage_adapter()
-            
-            # For local storage, construct full path
-            if settings.is_local:
-                full_path = Path(settings.UPLOAD_DIR) / audio_path
-                if not full_path.exists():
-                    logger.error(f"Audio file not found: {full_path}")
-                    return None
-                
-                audio_file = str(full_path)
-            else:
-                # For cloud storage, download temporarily
-                temp_path = Path("/tmp") / Path(audio_path).name
-                file_data = await storage.get_file(audio_path)
-                
-                with open(temp_path, 'wb') as f:
-                    f.write(file_data)
-                
-                audio_file = str(temp_path)
-            
-            logger.info(f"🎙️ Starting local transcription for {audio_file}")
-            
-            # Run transcription in executor (CPU intensive)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                self._transcribe_sync,
-                audio_file
-            )
-            
-            # Clean up temp file if created
-            if not settings.is_local and Path(audio_file).exists():
-                Path(audio_file).unlink()
-            
-            logger.info("✅ Transcription complete")
-            return result.get('text') if result else None
-        
-        except Exception as e:
-            logger.error(f"❌ Error transcribing with Whisper: {e}")
-            return None
-    
-    def _transcribe_sync(self, audio_file: str) -> dict:
-        """Synchronous transcription"""
-        return self.model.transcribe(audio_file)
+            logger.error(f"❌ Whisper load failed: {e}")
 
-class AzureSpeechTranscriber(Transcriber):
-    """Azure Speech Services transcriber"""
-    
-    def __init__(self):
-        if not settings.AZURE_SPEECH_KEY or not settings.AZURE_SPEECH_REGION:
-            raise ValueError("Azure Speech credentials not configured")
-        
-        try:
-            import azure.cognitiveservices.speech as speechsdk
-            
-            self.speech_config = speechsdk.SpeechConfig(
-                subscription=settings.AZURE_SPEECH_KEY,
-                region=settings.AZURE_SPEECH_REGION
-            )
-            self.speech_config.speech_recognition_language = "en-US"
-            logger.info("✅ Azure Speech Services configured")
-        except ImportError:
-            raise ImportError("Azure Speech SDK not installed")
-    
     async def transcribe_audio(self, audio_path: str) -> Optional[str]:
-        """Transcribe audio using Azure Speech Services"""
+        segments = await self.transcribe_audio_with_timestamps(audio_path)
+        if not segments:
+            return None
+        return " ".join(seg["text"] for seg in segments)
+
+    async def transcribe_audio_with_timestamps(
+        self, audio_path: str
+    ) -> Optional[List[Dict]]:
+        if not self.model:
+            return None
+
+        audio_file = await self._resolve_audio_path(audio_path)
+
         try:
-            import azure.cognitiveservices.speech as speechsdk
-            
-            # Get audio file
-            from app.services.storage.adapter import get_storage_adapter
-            storage = get_storage_adapter()
-            
-            if settings.is_local:
-                full_path = Path(settings.UPLOAD_DIR) / audio_path
-                audio_file = str(full_path)
-            else:
-                # Download from blob storage
-                temp_path = Path("/tmp") / Path(audio_path).name
-                file_data = await storage.get_file(audio_path)
-                
-                with open(temp_path, 'wb') as f:
-                    f.write(file_data)
-                
-                audio_file = str(temp_path)
-            
-            # Create audio config
-            audio_config = speechsdk.AudioConfig(filename=audio_file)
-            
-            # Create recognizer
-            speech_recognizer = speechsdk.SpeechRecognizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
-            
-            logger.info(f"🎙️ Starting Azure transcription for {audio_file}")
-            
-            # Perform recognition
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                self._recognize_sync,
-                speech_recognizer
+                self.model.transcribe,
+                audio_file,
             )
-            
-            # Clean up temp file
-            if not settings.is_local and Path(audio_file).exists():
-                Path(audio_file).unlink()
-            
-            return result
-        
+
+            return [
+                {
+                    "start": float(seg["start"]),
+                    "end": float(seg["end"]),
+                    "text": seg["text"].strip(),
+                }
+                for seg in result.get("segments", [])
+            ]
+
         except Exception as e:
-            logger.error(f"❌ Error transcribing with Azure Speech: {e}")
+            logger.error(f"❌ Whisper transcription failed: {e}")
             return None
-    
-    def _recognize_sync(self, recognizer) -> Optional[str]:
-        """Synchronous recognition"""
+
+    async def _resolve_audio_path(self, audio_path: str) -> str:
+        """
+        Resolve an audio path to a local filesystem path.
+
+        Supports:
+        - Absolute paths (for directly uploaded audio/video files)
+        - Relative storage paths (e.g. \"user_id/content_id/audio.mp3\")
+        """
+        p = Path(audio_path)
+        if p.is_absolute() and p.exists():
+            # Direct absolute path (e.g. uploaded video file on local disk)
+            return str(p)
+
+        if settings.is_local:
+            path = Path(settings.UPLOAD_DIR) / audio_path
+            if not path.exists():
+                raise FileNotFoundError(path)
+            return str(path)
+
+        from app.services.storage.adapter import get_storage_adapter
+        storage = get_storage_adapter()
+        tmp = Path("/tmp") / Path(audio_path).name
+        tmp.write_bytes(await storage.get_file(audio_path))
+        return str(tmp)
+
+
+# ==========================================================
+# Azure Speech (fallback, NO timestamps)
+# ==========================================================
+class AzureSpeechTranscriber(Transcriber):
+    def __init__(self):
+        if not settings.AZURE_SPEECH_KEY:
+            raise RuntimeError("Azure Speech not configured")
+
         import azure.cognitiveservices.speech as speechsdk
-        
-        all_text = []
+
+        self.speechsdk = speechsdk
+        self.config = speechsdk.SpeechConfig(
+            subscription=settings.AZURE_SPEECH_KEY,
+            region=settings.AZURE_SPEECH_REGION,
+        )
+
+    async def transcribe_audio(self, audio_path: str) -> Optional[str]:
+        segments = await self.transcribe_audio_with_timestamps(audio_path)
+        if not segments:
+            return None
+        return " ".join(seg["text"] for seg in segments)
+
+    async def transcribe_audio_with_timestamps(
+        self, audio_path: str
+    ) -> Optional[List[Dict]]:
+        text = await self._transcribe_plain(audio_path)
+        if not text:
+            return None
+        return [{"start": None, "end": None, "text": text}]
+
+    async def _transcribe_plain(self, audio_path: str) -> Optional[str]:
+        from app.services.storage.adapter import get_storage_adapter
+
+        storage = get_storage_adapter()
+        tmp = Path("/tmp") / Path(audio_path).name
+        tmp.write_bytes(await storage.get_file(audio_path))
+
+        audio_cfg = self.speechsdk.AudioConfig(filename=str(tmp))
+        recognizer = self.speechsdk.SpeechRecognizer(
+            speech_config=self.config,
+            audio_config=audio_cfg,
+        )
+
         done = False
-        
-        def stop_cb(evt):
+        text_chunks = []
+
+        def recognized(evt):
+            if evt.result.text:
+                text_chunks.append(evt.result.text)
+
+        def stop(_):
             nonlocal done
             done = True
-        
-        def recognized_cb(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                all_text.append(evt.result.text)
-        
-        recognizer.recognized.connect(recognized_cb)
-        recognizer.session_stopped.connect(stop_cb)
-        recognizer.canceled.connect(stop_cb)
-        
-        recognizer.start_continuous_recognition()
-        
-        # Wait for completion
-        import time
-        while not done:
-            time.sleep(0.5)
-        
-        recognizer.stop_continuous_recognition()
-        
-        return ' '.join(all_text) if all_text else None
 
+        recognizer.recognized.connect(recognized)
+        recognizer.session_stopped.connect(stop)
+        recognizer.canceled.connect(stop)
+
+        recognizer.start_continuous_recognition()
+        while not done:
+            await asyncio.sleep(0.5)
+        recognizer.stop_continuous_recognition()
+
+        return " ".join(text_chunks)
+
+
+# ==========================================================
+# YouTube transcript (native timestamps)
+# ==========================================================
+def get_youtube_transcript_with_timestamps(youtube_url: str) -> List[Dict]:
+    """
+    Fully version-independent YouTube transcript loader.
+
+    Handles:
+    - module-level APIs
+    - class-based APIs
+    - old + new youtube-transcript-api releases
+    """
+
+    import re
+    import youtube_transcript_api as yta
+
+    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", youtube_url)
+    if not match:
+        raise ValueError("Invalid YouTube URL")
+
+    video_id = match.group(1)
+    preferred_languages = ["en", "en-US", "en-GB"]
+
+    transcript_data = None
+    last_error = None
+
+    # --------------------------------------------------
+    # PATH 1 — list_transcripts (module-level)
+    # --------------------------------------------------
+    if hasattr(yta, "list_transcripts"):
+        try:
+            transcript_list = yta.list_transcripts(video_id)
+
+            try:
+                transcript = transcript_list.find_manually_created_transcript(
+                    preferred_languages
+                )
+            except Exception:
+                transcript = transcript_list.find_generated_transcript(
+                    preferred_languages
+                )
+
+            transcript_data = transcript.fetch()
+        except Exception as e:
+            last_error = e
+
+    # --------------------------------------------------
+    # PATH 2 — get_transcript (module-level)
+    # --------------------------------------------------
+    if transcript_data is None and hasattr(yta, "get_transcript"):
+        for lang in preferred_languages:
+            try:
+                transcript_data = yta.get_transcript(
+                    video_id, languages=[lang]
+                )
+                break
+            except Exception as e:
+                last_error = e
+
+        if transcript_data is None:
+            try:
+                transcript_data = yta.get_transcript(video_id)
+            except Exception as e:
+                last_error = e
+
+    # --------------------------------------------------
+    # FAIL HARD IF NOTHING WORKED
+    # --------------------------------------------------
+    if not transcript_data:
+        raise RuntimeError(
+            f"No transcript available for YouTube video {video_id}"
+        ) from last_error
+
+    # --------------------------------------------------
+    # Normalize output
+    # --------------------------------------------------
+    segments: List[Dict] = []
+    for entry in transcript_data:
+        start = float(entry.get("start", 0))
+        duration = float(entry.get("duration", 0))
+        segments.append({
+            "start": start,
+            "end": start + duration,
+            "text": entry.get("text", "").strip(),
+        })
+
+    if not segments:
+        raise RuntimeError("Transcript parsing produced zero segments")
+
+    logger.info("📺 YouTube transcript loaded | segments=%d", len(segments))
+    return segments
+
+# ==========================================================
+# Factory
+# ==========================================================
 def get_transcriber() -> Transcriber:
-    """
-    Factory function to get appropriate transcriber based on deployment mode.
-    """
     if settings.is_local:
         return WhisperTranscriber()
-    else:
-        if settings.AZURE_SPEECH_KEY:
-            return AzureSpeechTranscriber()
-        else:
-            return WhisperTranscriber()
+    if settings.AZURE_SPEECH_KEY:
+        return AzureSpeechTranscriber()
+    return WhisperTranscriber()

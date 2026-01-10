@@ -1,32 +1,43 @@
 import json
 import logging
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Dict, Tuple
 
-import requests
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.models.models import ContentItem, ContentChunk
+from app.models.models import ContentItem, ContentChunk, VideoChapter
 from app.schemas.schemas import ContentSourceType, ContentStatus
 from app.config import settings
 
+# ─────────────────────────────────────────────
+# Storage & media
+# ─────────────────────────────────────────────
 from app.services.storage.adapter import get_storage_adapter
-from app.services.transcription.transcriber import get_transcriber
 from app.services.youtube_downloader import YouTubeDownloader
 
 # ─────────────────────────────────────────────
-# New hybrid pipeline services
+# Transcription (timestamps guaranteed)
 # ─────────────────────────────────────────────
-from app.services.chunking.ollama_card_compiler import compile_cards
+from app.services.transcription.transcriber import (
+    get_transcriber,
+    get_youtube_transcript_with_timestamps,
+)
 
-from app.services.video_pipeline.video_downloader import download_video
-from app.services.vlm.scene_segmenter import segment_scenes
-from app.services.vlm.frame_sampler import sample_frames
+# ─────────────────────────────────────────────
+# LLM chapterization (NO VLM)
+# ─────────────────────────────────────────────
+from app.services.video_pipeline.chapter_generator import generate_video_chapters
+from app.services.video_pipeline.video_rag_chunker import generate_video_chunks
+
+
+# ─────────────────────────────────────────────
+# Document pipeline
+# ─────────────────────────────────────────────
 from app.services.document_extraction.layout_extractor import extract_layout_units
-from app.services.video_pipeline.vlm_video_analyzer import analyze_video_segments
-from app.services.chunking.video_chunk_compiler import compile_video_chunks
+from app.services.chunking.ollama_card_compiler import compile_cards
 
 
 logger = logging.getLogger("ContentProcessor")
@@ -64,6 +75,7 @@ class ContentProcessor:
     # ─────────────────────────────────────────────
     # Public entrypoint
     # ─────────────────────────────────────────────
+
     async def process_content_task(self, content_id: int) -> None:
         logger.info(f"🔄 [START] Processing content_id={content_id}")
         start_ts = datetime.now(timezone.utc)
@@ -75,12 +87,15 @@ class ContentProcessor:
                 .filter(ContentItem.id == content_id)
                 .first()
             )
+
             if not content:
                 logger.error("❌ Content not found")
                 return
 
             logger.info(
-                f"📄 Content loaded | id={content.id} | type={content.source_type}"
+                "📄 Content loaded | id=%s | type=%s",
+                content.id,
+                content.source_type,
             )
 
             # ─────────────────────────────────────────────
@@ -88,22 +103,19 @@ class ContentProcessor:
             # ─────────────────────────────────────────────
             content.status = ContentStatus.PROCESSING
             content.stage = "INITIALIZING"
-            logger.info(
-                "📊 Processing metadata | source_type=%s | user_id=%s",
-                content.source_type,
-                content.user_id,
-            )
-            content.processed_at = datetime.now(timezone.utc)
             content.error_message = None
+            content.processed_at = datetime.now(timezone.utc)
             db.commit()
-            
-            # Broadcast status via WebSocket
-            await broadcast_status(content.user_id, content.id, "processing", "INITIALIZING")
 
-            chunks: List[dict]
+            await broadcast_status(
+                content.user_id,
+                content.id,
+                "processing",
+                "INITIALIZING",
+            )
 
             # ─────────────────────────────────────────────
-            # Route by content type
+            # DOCUMENT PIPELINE (UNCHANGED)
             # ─────────────────────────────────────────────
             if content.source_type in {
                 ContentSourceType.PDF,
@@ -111,35 +123,180 @@ class ContentProcessor:
             }:
                 content.stage = "DOCUMENT_PIPELINE"
                 db.commit()
-                await broadcast_status(content.user_id, content.id, "processing", "DOCUMENT_PIPELINE")
+
+                await broadcast_status(
+                    content.user_id,
+                    content.id,
+                    "processing",
+                    "DOCUMENT_PIPELINE",
+                )
 
                 chunks = await self._process_document(content)
 
+                if not chunks:
+                    raise RuntimeError("No document chunks generated")
+
+                content.stage = "PERSISTING_CHUNKS"
+                db.commit()
+                self._persist_chunks(db, content, chunks)
+
+            # ─────────────────────────────────────────────
+            # VIDEO PIPELINE – YOUTUBE (authoritative path)
+            # ─────────────────────────────────────────────
             elif content.source_type == ContentSourceType.YOUTUBE:
                 content.stage = "VIDEO_PIPELINE"
                 db.commit()
-                await broadcast_status(content.user_id, content.id, "processing", "VIDEO_PIPELINE")
 
-                chunks = await self._process_video(content, db)
-
-            else:
-                raise RuntimeError(
-                    f"Unsupported source type: {content.source_type}"
+                await broadcast_status(
+                    content.user_id,
+                    content.id,
+                    "processing",
+                    "VIDEO_PIPELINE",
                 )
 
-            # ─────────────────────────────────────────────
-            # Validate output
-            # ─────────────────────────────────────────────
-            if not chunks:
-                raise RuntimeError("No chunks generated")
+                # ── Step 1: Transcript
+                # If a file was uploaded, ignore the URL and transcribe the file.
+                # Otherwise, use YouTube's native captions via the transcript API.
+                transcript_segments = None
+
+                # 1️⃣ Prefer uploaded file if present
+                if content.file_path:
+                    logger.info("🎧 Using uploaded video file for transcription")
+                    transcript_segments = await self.transcriber.transcribe_audio_with_timestamps(
+                        content.file_path
+                    )
+
+                # 2️⃣ Try YouTube captions
+                if not transcript_segments:
+                    try:
+                        logger.info("📺 Attempting YouTube native transcript")
+                        transcript_segments = get_youtube_transcript_with_timestamps(
+                            content.source_url
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ YouTube transcript unavailable: {e}")
+
+                # 3️⃣ FINAL fallback — download audio + Whisper
+                if not transcript_segments:
+                    logger.info("⬇️ Downloading audio for Whisper fallback")
+
+                    audio_path = await self.youtube_downloader.download_audio(
+                        content.source_url,
+                        f"{content.user_id}/{content.id}",
+                    )
+
+                    if not audio_path:
+                        logger.error(
+                            "❌ YouTube audio download failed — cannot run Whisper fallback"
+                        )
+                    else:
+                        transcript_segments = await self.transcriber.transcribe_audio_with_timestamps(
+                            audio_path
+                        )
+
+                # 4️⃣ Hard fail only if Whisper also failed
+                if not transcript_segments:
+                    raise RuntimeError("Transcript generation failed (YouTube + Whisper)")
+                
+                # ── Step 2: Chapterization (deterministic from transcript indices)
+
+                logger.info("🧠 Performing RAG-based video chunking")
+
+                chapters = await generate_video_chunks(transcript_segments)
+
+                if not chapters:
+                    raise RuntimeError("No video chunks generated")
+
+                # ── Step 3: Persist chapters with deterministic timestamps
+                db.query(VideoChapter).filter(
+                    VideoChapter.content_id == content.id
+                ).delete()
+
+                for ch in chapters:
+                    db.add(
+                        VideoChapter(
+                            content_id=content.id,   # ✅ correct & authoritative
+                            chapter_index=ch["index"],
+                            title=ch["title"],
+                            start_seconds=int(ch["start"]),
+                            end_seconds=int(ch["end"]),
+                            summary=ch["summary"],
+                        )
+                    )
+
+                db.commit()
 
             # ─────────────────────────────────────────────
-            # Persist chunks
+            # VIDEO PIPELINE – Generic video (non‑YouTube)
             # ─────────────────────────────────────────────
-            content.stage = "PERSISTING_CHUNKS"
-            db.commit()
+            elif content.source_type == ContentSourceType.VIDEO:
+                content.stage = "VIDEO_PIPELINE"
+                db.commit()
 
-            self._persist_chunks(db, content, chunks)
+                await broadcast_status(
+                    content.user_id,
+                    content.id,
+                    "processing",
+                    "VIDEO_PIPELINE",
+                )
+
+                # ── Step 1: Transcript
+                # - If we have a source_url, treat it as a remote video URL and
+                #   use the downloader (e.g., Loom, Vimeo, direct MP4 links).
+                # - If we only have an uploaded file, transcribe it directly
+                #   via Whisper using the stored file path.
+                if content.source_url:
+                    audio_path = await self.youtube_downloader.download_audio(
+                        content.source_url,
+                        f"{content.user_id}/{content.id}",
+                    )
+
+                    if not audio_path:
+                        raise RuntimeError(
+                            "YouTube audio download failed — cannot transcribe video"
+                        )
+
+                    transcript_segments = await self.transcriber.transcribe_audio_with_timestamps(
+                        audio_path
+                    )
+
+                else:
+                    file_path = self._resolve_file_path(content)
+                    transcript_segments = await self.transcriber.transcribe_audio_with_timestamps(
+                        file_path
+                    )
+
+                if not transcript_segments:
+                    raise RuntimeError("Transcript generation failed")
+
+                # ── Step 2: Chapterization
+                chapters_json = await generate_video_chapters(transcript_segments)
+
+                chapters = chapters_json.get("chapters")
+                if not chapters:
+                    raise RuntimeError("LLM returned no chapters")
+
+                # ── Step 3: Persist chapters
+                db.query(VideoChapter).filter(
+                    VideoChapter.content_id == content.id
+                ).delete()
+
+                for ch in chapters:
+                    db.add(
+                        VideoChapter(
+                            content_id=content.id,   # ✅ correct & authoritative
+                            chapter_index=ch["index"],
+                            title=ch["title"],
+                            start_seconds=int(ch["start"]),
+                            end_seconds=int(ch["end"]),
+                            summary=ch["summary"],
+                        )
+                    )
+
+                db.commit()
+
+            else:
+                raise RuntimeError(f"Unsupported source type: {content.source_type}")
 
             # ─────────────────────────────────────────────
             # Mark completion
@@ -149,16 +306,17 @@ class ContentProcessor:
             content.processed_at = datetime.now(timezone.utc)
             content.error_message = None
             db.commit()
-            
-            # Broadcast completion via WebSocket
-            await broadcast_status(content.user_id, content.id, "completed", None)
-            
+
+            await broadcast_status(
+                content.user_id,
+                content.id,
+                "completed",
+                None,
+            )
+
             elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
             logger.info("⏱️ Total processing time: %.2fs", elapsed)
-
-            logger.info(
-                f"✅ [DONE] Content {content.id} processed → {len(chunks)} chunks"
-            )
+            logger.info("✅ [DONE] Content %s processed successfully", content.id)
 
         except Exception as e:
             logger.exception("❌ Processing failed")
@@ -167,8 +325,15 @@ class ContentProcessor:
                 content.status = ContentStatus.FAILED
                 content.stage = None
                 content.error_message = str(e)
-                content.processed_at = self.new_method()
+                content.processed_at = datetime.now(timezone.utc)
                 db.commit()
+
+                await broadcast_status(
+                    content.user_id,
+                    content.id,
+                    "failed",
+                    None,
+                )
             except Exception:
                 logger.exception("❌ Failed to mark content FAILED")
 
@@ -283,128 +448,6 @@ class ContentProcessor:
     # ─────────────────────────────────────────────
     # Video pipeline (visual-first)
     # ─────────────────────────────────────────────
-    async def _process_video(
-        self, content: ContentItem, db: Session
-    ) -> List[dict]:
-        logger.info("🎬 Video pipeline started")
-
-        video_path: Optional[str] = None
-        audio_path: Optional[str] = None
-        transcript: Optional[str] = None
-
-        try:
-            # ─────────────────────────────────────────
-            # 1. Download full video (temporary storage)
-            # ─────────────────────────────────────────
-            video_path = await download_video(
-                url=content.source_url,
-                output_dir=f"uploads/{content.user_id}/{content.id}/video"
-            )
-
-            logger.info(f"📥 Video downloaded → {video_path}")
-
-            # ─────────────────────────────────────────
-            # 2. Optional transcription (auxiliary signal)
-            # ─────────────────────────────────────────
-            try:
-                audio_path = await self.youtube_downloader.download_audio(
-                    content.source_url,
-                    f"{content.user_id}/{content.id}",
-                )
-
-                logger.info(f"🎵 Audio extracted → {audio_path}")
-
-                transcript = await self.transcriber.transcribe_audio(audio_path)
-
-                if transcript:
-                    content.transcript_text = transcript
-                    db.commit()
-                    logger.info(
-                        f"📝 Transcript generated ({len(transcript)} characters)"
-                    )
-                else:
-                    logger.warning("⚠️ Transcription returned empty text")
-
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Transcription skipped (non-fatal): {e}"
-                )
-
-            # ─────────────────────────────────────────
-            # 3. Context-aware visual segmentation
-            # ─────────────────────────────────────────
-            segments = await segment_scenes(video_path)
-
-            if not segments:
-                raise RuntimeError("No video segments detected")
-
-            logger.info(
-                f"🧩 Video segmented into {len(segments)} visual sub-topics"
-            )
-            if len(segments) > 50:
-                logger.warning(
-                    "⚠️ High segment count (%d) — video may be over-segmented",
-                    len(segments),
-                )
-
-            # ─────────────────────────────────────────
-            # 4. Frame sampling per segment
-            # ─────────────────────────────────────────
-            frames_by_segment = await sample_frames(
-                video_path=video_path,
-                segments=segments,
-            )
-
-            logger.info(
-                f"🖼️ Frames sampled for {len(frames_by_segment)} segments"
-            )
-
-            # ─────────────────────────────────────────
-            # 5. On-device VLM semantic analysis
-            # ─────────────────────────────────────────
-            vlm_results = await analyze_video_segments(
-                frames_by_segment=frames_by_segment,
-                transcript=transcript,  # auxiliary signal
-                title=content.title or "Untitled Video",
-            )
-
-            if not vlm_results:
-                raise RuntimeError("VLM returned no semantic results")
-
-            logger.info(
-                f"👁️ VLM analyzed {len(vlm_results)} segments successfully"
-            )
-
-            # ─────────────────────────────────────────
-            # 6. Normalize VLM output → chunk cards
-            # ─────────────────────────────────────────
-            chunks = compile_video_chunks(
-                vlm_results=vlm_results,
-                source_url=content.source_url,
-            )
-
-            if not chunks:
-                raise RuntimeError("Video chunk compilation returned empty output")
-
-            logger.info(f"🧾 Video chunks compiled: {len(chunks)}")
-
-            return chunks
-
-        finally:
-            # ─────────────────────────────────────────
-            # 7. Cleanup temporary artifacts
-            # ─────────────────────────────────────────
-            try:
-                if video_path:
-                    Path(video_path).unlink(missing_ok=True)
-                    logger.info("🧹 Temporary video file removed")
-
-                if audio_path:
-                    Path(audio_path).unlink(missing_ok=True)
-                    logger.info("🧹 Temporary audio file removed")
-
-            except Exception as e:
-                logger.warning(f"⚠️ Cleanup failed: {e}")
 
 
     # ─────────────────────────────────────────────

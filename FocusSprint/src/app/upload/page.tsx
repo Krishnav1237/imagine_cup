@@ -66,7 +66,13 @@ export default function UploadPage() {
   };
 
   const handleProcess = async () => {
-    if (!input && !file) return;
+    // Basic validation per tab
+    if (activeTab === "youtube") {
+      // Require at least a URL or a file
+      if (!input && !file) return;
+    } else if (!file) {
+      return;
+    }
     setProcessing(true);
     setError("");
     setStatusMessage("Uploading...");
@@ -87,7 +93,12 @@ export default function UploadPage() {
       formData.append("source_type", type);
       
       if (activeTab === "youtube") {
-        formData.append("source_url", input);
+        if (input) {
+          formData.append("source_url", input);
+        }
+        if (file) {
+          formData.append("file", file);
+        }
       } else if (file) {
         formData.append("file", file);
       }
@@ -142,9 +153,9 @@ export default function UploadPage() {
             {/* Tabs */}
             <div className="flex gap-2 mb-8">
               {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => { setActiveTab(tab.id); setInput(""); setFile(null); }}
+              <button
+                key={tab.id}
+                onClick={() => { setActiveTab(tab.id); setInput(""); setFile(null); }}
                   className={`flex-1 flex items-center justify-center gap-2 px-6 py-4 rounded-xl border transition-all ${
                     activeTab === tab.id 
                       ? "bg-[#1e1e2e] border-white/20 text-white" 
@@ -158,9 +169,9 @@ export default function UploadPage() {
             </div>
 
             {/* Input Area */}
-            <div className="min-h-[200px] flex flex-col justify-center">
-              {activeTab === "youtube" ? (
-                <div className="space-y-4">
+            <div className="min-h-[200px] flex flex-col justify-center space-y-4">
+              {activeTab === "youtube" && (
+                <div className="space-y-2">
                   <input
                     type="text"
                     value={input}
@@ -168,41 +179,52 @@ export default function UploadPage() {
                     placeholder="https://www.youtube.com/watch?v=..."
                     className="w-full px-6 py-4 rounded-xl bg-[#0a0a12] border border-[#2a2a3e] text-white focus:border-[#ff6b4a] outline-none"
                   />
-                  <p className="text-sm text-[#8888a0]">Our AI will transcribe and analyze the video.</p>
-                </div>
-              ) : (
-                <div 
-                  onClick={() => document.getElementById("file-input")?.click()}
-                  className="border-2 border-dashed border-[#2a2a3e] rounded-xl p-12 text-center cursor-pointer hover:border-[#ff6b4a]/50 transition-colors"
-                >
-                  {file ? (
-                    <div className="flex items-center justify-center gap-3">
-                      <FileText className="w-8 h-8 text-[#7c3aed]" />
-                      <div className="text-left">
-                        <p className="font-medium text-white">{file.name}</p>
-                        <p className="text-sm text-[#8888a0]">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <p className="text-white mb-2">Click to upload {activeTab.toUpperCase()}</p>
-                      <p className="text-sm text-[#8888a0]">Max size 50MB</p>
-                    </div>
-                  )}
-                  <input 
-                    id="file-input" 
-                    type="file" 
-                    accept={activeTab === "pdf" ? ".pdf" : ".ppt,.pptx"}
-                    className="hidden" 
-                    onChange={(e) => setFile(e.target.files?.[0] || null)} 
-                  />
+                  <p className="text-sm text-[#8888a0]">
+                    Paste a YouTube URL and optionally upload a local video file. If a file is provided, it will be used instead of captions.
+                  </p>
                 </div>
               )}
+
+              <div 
+                onClick={() => document.getElementById("file-input")?.click()}
+                className="border-2 border-dashed border-[#2a2a3e] rounded-xl p-12 text-center cursor-pointer hover:border-[#ff6b4a]/50 transition-colors"
+              >
+                {file ? (
+                  <div className="flex items-center justify-center gap-3">
+                    {activeTab === "youtube" ? (
+                      <Youtube className="w-8 h-8 text-[#ff6b4a]" />
+                    ) : (
+                      <FileText className="w-8 h-8 text-[#7c3aed]" />
+                    )}
+                    <div className="text-left">
+                      <p className="font-medium text-white">{file.name}</p>
+                      <p className="text-sm text-[#8888a0]">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-white mb-2">
+                      {activeTab === "youtube" ? "Click to upload an optional video file" : `Click to upload ${activeTab.toUpperCase()}`}
+                    </p>
+                    <p className="text-sm text-[#8888a0]">Max size 50MB</p>
+                  </div>
+                )}
+                <input 
+                  id="file-input" 
+                  type="file" 
+                  accept={activeTab === "pdf" ? ".pdf" : activeTab === "ppt" ? ".ppt,.pptx" : "video/*"}
+                  className="hidden" 
+                  onChange={(e) => setFile(e.target.files?.[0] || null)} 
+                />
+              </div>
             </div>
 
             <Button
               onClick={handleProcess}
-              disabled={processing || (!input && !file)}
+              disabled={
+                processing ||
+                (activeTab === "youtube" ? (!input && !file) : !file)
+              }
               className="w-full bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-semibold px-8 py-6 text-lg rounded-xl mt-8 disabled:opacity-50"
             >
               {processing ? (

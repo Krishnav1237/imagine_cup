@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { useUser } from "@/lib/user-context";
 import { AppNav } from "@/components/app-nav";
 
+import { YouTubeChapterPlayer } from "@/components/youtube-chapter-player";
+import { fetchVideoChapters } from "@/lib/api";
+
 // ADHD Components
 import { VisualTimer } from "@/components/ui/visual-timer";
 import { HyperfocusGuard } from "@/components/hyperfocus-guard";
@@ -67,6 +70,14 @@ function SprintContent() {
 
   // Core state
   const [content, setContent] = useState<ContentDetail | null>(null);
+  const [chapters, setChapters] = useState<{
+    index: number;
+    title: string;
+    start: number;
+    end: number;
+    summary: string;
+  }[]>([]);
+  const [activeChapterIndex, setActiveChapterIndex] = useState(0);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [authMissing, setAuthMissing] = useState(false);
@@ -128,6 +139,21 @@ function SprintContent() {
     };
     fetchData();
   }, [contentId, router]);
+
+  // Fetch video chapters (YouTube only)
+useEffect(() => {
+  if (!contentId || !content || content.source_type !== "youtube") return;
+
+  const token = localStorage.getItem("focus_token");
+  if (!token) return;
+
+  fetchVideoChapters(Number(contentId), token)
+    .then(setChapters)
+    .catch(err => {
+      console.error("Failed to load video chapters", err);
+    });
+}, [contentId, content]);
+
   
   // Timer
   useEffect(() => {
@@ -148,6 +174,8 @@ function SprintContent() {
   }, [isMicroMode, elapsedSeconds, completeMicro]);
 
   const handleChunkComplete = async () => {
+    if (!currentChunk) return;
+
     const token = localStorage.getItem("focus_token");
     const simulatedAttention = Math.floor(Math.random() * (100 - 80 + 1) + 80);
     
@@ -245,10 +273,36 @@ function SprintContent() {
     );
   }
 
-  const currentChunk = content.chunks[currentChunkIndex];
-  const isLastChunk = currentChunkIndex === content.chunks.length - 1;
-  const chunkDuration = isMicroMode ? 30 : (currentChunk.duration_seconds ?? 300);
+
+  if (
+    content.source_type !== "youtube" &&
+    (!content.chunks || content.chunks.length === 0)
+  ) {
+    return (
+      <div className="min-h-screen bg-[#0a0a12] flex items-center justify-center text-white">
+        No sprint content available.
+      </div>
+    );
+  }
+
+  const hasChunks = !!content.chunks?.length;
+  const currentChunk = hasChunks ? content.chunks[currentChunkIndex] : null;
+  const isLastChunk = hasChunks
+    ? currentChunkIndex === content.chunks.length - 1
+    : true;
+  const chunkDuration =
+  content.source_type === "youtube"
+    ? undefined
+    : isMicroMode
+      ? 30
+      : (currentChunk.duration_seconds ?? 300);
   const intervention = getRandomIntervention();
+  const progressPercent =
+    content.source_type === "youtube"
+      ? chapters.length > 0
+        ? (activeChapterIndex / chapters.length) * 100
+        : 0
+      : (currentChunkIndex / content.chunks.length) * 100;
 
   return (
     <HyperfocusGuard enabled={!showPrompt} thresholdMinutes={45}>
@@ -264,7 +318,7 @@ function SprintContent() {
             <motion.div
               className="h-full bg-[#ff6b4a]"
               initial={{ width: 0 }}
-              animate={{ width: `${((currentChunkIndex) / content.chunks.length) * 100}%` }}
+              animate={{ width: `${progressPercent}%` }}
             />
           </div>
 
@@ -275,24 +329,42 @@ function SprintContent() {
                 <div className="flex items-center gap-2 text-[#8888a0] mb-2 text-sm">
                   <span>{content.title}</span>
                   <span>•</span>
-                  <span>Sprint {currentChunk.sequence_number} of {content.chunks.length}</span>
+                  {hasChunks ? (
+                    <span>
+                      Sprint {currentChunk?.sequence_number} of{" "}
+                      {content.chunks.length}
+                    </span>
+                  ) : content.source_type === "youtube" && chapters.length ? (
+                    <span>
+                      Chapter {activeChapterIndex + 1} of {chapters.length}
+                    </span>
+                  ) : null}
                   {isMicroMode && (
                     <span className="ml-2 px-2 py-0.5 bg-[#ff6b4a]/20 text-[#ff6b4a] text-xs rounded-full">
                       ⚡ MICRO MODE
                     </span>
                   )}
                 </div>
-                <h1 className="text-3xl font-bold">{currentChunk.title}</h1>
+                <h1 className="text-3xl font-bold">
+                  {hasChunks
+                    ? currentChunk?.title
+                    : content.source_type === "youtube" &&
+                      chapters[activeChapterIndex]
+                    ? chapters[activeChapterIndex].title
+                    : content.title}
+                </h1>
               </div>
               
               {/* Visual Timer */}
-              <VisualTimer
-                duration={chunkDuration}
-                elapsed={elapsedSeconds}
-                isPaused={isPaused}
-                size={100}
-                showComparison={true}
-              />
+              {typeof chunkDuration === "number" && (
+                <VisualTimer
+                  duration={chunkDuration}
+                  elapsed={elapsedSeconds}
+                  isPaused={isPaused}
+                  size={100}
+                  showComparison={true}
+                />
+              )}
             </header>
 
             {/* Content Area */}
@@ -301,13 +373,67 @@ function SprintContent() {
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl overflow-hidden aspect-video relative group">
                   {content.source_type === "youtube" ? (
-                    <div className="w-full h-full flex items-center justify-center bg-black/50">
-                      <PlayCircle className="w-16 h-16 text-white/50 group-hover:text-[#ff6b4a] transition-colors" />
-                      <p className="absolute bottom-4 text-sm text-white/70">
-                        Video Sync active for timestamp {currentChunk.sequence_number * 5}:00
-                      </p>
-                    </div>
-                  ) : (
+                      chapters.length === 0 ? (
+                        <div className="flex items-center justify-center h-full text-[#8888a0]">
+                          Preparing video chapters…
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 h-full">
+                          
+                          {/* LEFT: VIDEO + SUMMARY */}
+                          <div className="lg:col-span-3 space-y-6">
+                            <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl overflow-hidden aspect-video">
+                              <YouTubeChapterPlayer
+                                videoId={extractYouTubeId(content.source_url)}
+                                chapters={chapters}
+                                activeIndex={activeChapterIndex}
+                                onChapterChange={setActiveChapterIndex}
+                              />
+                            </div>
+
+                            <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl p-6">
+                              <h2 className="text-2xl font-bold mb-3">
+                                {chapters[activeChapterIndex]?.title}
+                              </h2>
+                              <p className="text-[#8888a0] leading-relaxed">
+                                {chapters[activeChapterIndex]?.summary}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* RIGHT: CHAPTER SIDEBAR */}
+                          <aside className="space-y-3">
+                            <h3 className="text-lg font-semibold mb-2">Chapters</h3>
+
+                            {chapters.map((ch, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => setActiveChapterIndex(idx)}
+                                className={`w-full text-left px-4 py-3 rounded-xl border transition
+                                  ${
+                                    idx === activeChapterIndex
+                                      ? "bg-[#ff6b4a]/20 border-[#ff6b4a] text-white"
+                                      : "bg-[#13131f] border-[#2a2a3e] text-[#8888a0] hover:text-white"
+                                  }
+                                `}
+                              >
+                                <div className="text-sm font-medium">
+                                  {idx + 1}. {ch.title}
+                                </div>
+                                <div className="text-xs mt-1 opacity-70">
+                                  {Math.floor(ch.start / 60)}:
+                                  {(Math.floor(ch.start % 60)).toString().padStart(2, "0")}
+                                  {" – "}
+                                  {Math.floor(ch.end / 60)}:
+                                  {(Math.floor(ch.end % 60)).toString().padStart(2, "0")}
+                                </div>
+                              </button>
+                            ))}
+                          </aside>
+                        </div>
+                      )
+                    ) : (
+
                     <div className="p-8 h-full overflow-y-auto">
                       <p className="whitespace-pre-wrap text-lg leading-relaxed text-[#d4d4d8]">
                         {currentChunk.text_content || currentChunk.summary}
@@ -322,7 +448,7 @@ function SprintContent() {
                     Key Concepts
                   </h3>
                   <div className="flex flex-wrap gap-2">
-                    {currentChunk.key_concepts?.length
+                    {hasChunks && currentChunk?.key_concepts?.length
                       ? currentChunk.key_concepts.map((concept, i) => (
                           <span
                             key={i}
@@ -341,7 +467,12 @@ function SprintContent() {
                 <div className="bg-[#13131f] border border-[#2a2a3e] rounded-3xl p-6 h-full flex flex-col">
                   <h3 className="text-xl font-bold mb-4">Summary</h3>
                   <p className="text-[#8888a0] leading-relaxed mb-8 flex-1">
-                    {currentChunk.summary}
+                    {hasChunks
+                      ? currentChunk?.summary
+                      : content.source_type === "youtube" &&
+                        chapters[activeChapterIndex]
+                      ? chapters[activeChapterIndex].summary
+                      : "No summary available."}
                   </p>
 
                   {/* Coins preview */}
@@ -352,12 +483,15 @@ function SprintContent() {
                     <span className="text-xs text-[#8888a0]">Mystery reward!</span>
                   </div>
 
-                  <Button
-                    onClick={handleChunkComplete}
-                    className="w-full h-14 bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-bold text-lg rounded-xl"
-                  >
-                    {isLastChunk ? "Complete Sprint" : "Next Sprint"} <ArrowRight className="ml-2" />
-                  </Button>
+                  {content.source_type !== "youtube" && (
+                    <Button
+                      onClick={handleChunkComplete}
+                      className="w-full h-14 bg-[#ff6b4a] hover:bg-[#ff8a70] text-[#0a0a12] font-bold text-lg rounded-xl"
+                    >
+                      {isLastChunk ? "Complete Sprint" : "Next Sprint"}{" "}
+                      <ArrowRight className="ml-2" />
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>
@@ -366,7 +500,7 @@ function SprintContent() {
           {/* Micro-Commitment Prompt */}
           <MicroCommitmentPrompt
             title={content.title}
-            fullDuration={currentChunk.duration_seconds ?? 300}
+            fullDuration={currentChunk?.duration_seconds ?? 300}
             onStartMicro={startMicro}
             onStartFull={startFull}
             isVisible={showPrompt}
@@ -412,6 +546,12 @@ function SprintContent() {
       </AttentionOverlay>
     </HyperfocusGuard>
   );
+}
+
+function extractYouTubeId(url?: string) {
+  if (!url) return "";
+  const match = url.match(/(?:v=|youtu\.be\/)([^&]+)/);
+  return match?.[1] ?? "";
 }
 
 export default function SprintPage() {

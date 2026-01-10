@@ -2,7 +2,7 @@
 SQLAlchemy Database Models.
 """
 from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 from datetime import datetime
 from app.core.database import Base
 
@@ -52,6 +52,7 @@ class ContentItem(Base):
     
     status = Column(String, default="pending") # pending, processing, completed, failed
     error_message = Column(String, nullable=True)
+    video_duration_seconds = Column(Integer, nullable=True)
     # Processing diagnostics
     stage = Column(String, nullable=True)          # e.g. DOCUMENT_PIPELINE, RAG, LLM, VIDEO_PIPELINE
     retry_count = Column(Integer, default=0)       # For controlled retries
@@ -103,6 +104,24 @@ class ContentChunk(Base):
     view_count = Column(Integer, default=0)
     avg_rating = Column(Float, nullable=True)
 
+class VideoChapter(Base):
+    __tablename__ = "video_chapters"
+
+    id = Column(Integer, primary_key=True)
+    # DB column is `content_id`, exposed in the model as `content_item_id`
+    content_id = Column("content_id", Integer, ForeignKey("content_items.id"))
+    content_item_id = synonym("content_id")
+
+    # DB column is `index`, exposed as `chapter_index` for clarity
+    chapter_index = Column("index", Integer)  # chapter number
+    title = Column(String)
+
+    start_seconds = Column(Integer)
+    end_seconds = Column(Integer)
+
+    summary = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class LearningSession(Base):
     __tablename__ = "learning_sessions"
@@ -157,3 +176,4 @@ class UserInventory(Base):
     is_equipped = Column(Boolean, default=False)  # For avatars/pets that can be equipped
     
     user = relationship("User", back_populates="inventory")
+

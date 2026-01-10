@@ -252,6 +252,25 @@ export async function uploadContent(formData: FormData) {
   return res.json();
 }
 
+export async function fetchVideoChapters(contentId: number, token: string) {
+  const res = await fetch(
+    `${process.env.NEXT_PUBLIC_API_URL}/content/${contentId}/chapters`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      cache: "no-store",
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch video chapters");
+  }
+
+  return res.json();
+}
+
+
 export async function addYouTubeContent(url: string, title: string) {
   return authFetch(`${API_URL}/content/`, {
     method: "POST",

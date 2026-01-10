@@ -60,6 +60,7 @@ class ContentSourceType(str, Enum):
     PDF = "pdf"
     PPTX = "pptx"
     YOUTUBE = "youtube"
+    VIDEO = "video"
 
 
 class ContentStatus(str, Enum):
@@ -89,6 +90,19 @@ class ContentChunk(BaseModel):
     
     class Config:
         from_attributes = True
+
+class VideoChapterSchema(BaseModel):
+    id: int
+    content_item_id: int
+    chapter_index: int
+    title: str
+    start_seconds: int
+    end_seconds: int
+    summary: str
+
+    class Config:
+        from_attributes = True
+
 
 class ContentItem(BaseModel):
     id: int

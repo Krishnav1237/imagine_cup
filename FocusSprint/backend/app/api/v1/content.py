@@ -13,13 +13,21 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.auth import get_current_active_user
-from app.models.models import User, ContentItem, ContentChunk, LearningSession, SessionChunk
+from app.models.models import (
+    User,
+    ContentItem,
+    ContentChunk,
+    LearningSession,
+    SessionChunk,
+    VideoChapter,
+)
 from app.schemas.schemas import (
     ContentItem as ContentItemSchema,
     ContentItemDetail,
     ContentStatus,
     ContentSourceType,
-    ChunkCompletion
+    ChunkCompletion,
+    VideoChapterSchema,
 )
 from app.config import settings
 from app.services.content_processor import processor
@@ -49,8 +57,16 @@ async def upload_content(
             detail=f"Invalid source type. Must be one of: {', '.join([e.value for e in ContentSourceType])}"
         )
     
-    if source_type == ContentSourceType.YOUTUBE.value and not source_url:
-        raise HTTPException(status_code=400, detail="source_url is required for YouTube content")
+    # For YouTube: allow either a URL, a file, or both.
+    if (
+        source_type == ContentSourceType.YOUTUBE.value
+        and not source_url
+        and not file
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Either source_url or file is required for YouTube content",
+        )
     
     if source_type in [ContentSourceType.PDF.value, ContentSourceType.PPTX.value] and not file:
         raise HTTPException(status_code=400, detail="file is required for PDF/PPTX content")
@@ -112,6 +128,27 @@ async def list_content(
         query = query.filter(ContentItem.status == status)
     return query.order_by(ContentItem.created_at.desc()).offset(skip).limit(limit).all()
 
+@router.get(
+    "/{content_id}/chapters",
+    response_model=list[VideoChapterSchema]
+)
+def get_video_chapters(
+    content_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    chapters = (
+        db.query(VideoChapter)
+        .join(ContentItem, VideoChapter.content_id == ContentItem.id)
+        .filter(
+            VideoChapter.content_id == content_id,
+            ContentItem.user_id == current_user.id,
+        )
+        .order_by(VideoChapter.chapter_index)
+        .all()
+    )
+
+    return chapters
 
 @router.get("/library")
 async def get_library(

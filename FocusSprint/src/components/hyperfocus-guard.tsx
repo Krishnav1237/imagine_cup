@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Coffee, Droplets, Stretch, Brain, Heart, X } from "lucide-react";
+import { Coffee, Droplets, StretchVertical, Brain, Heart, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface HyperfocusGuardProps {
@@ -20,7 +20,7 @@ interface HyperfocusGuardProps {
 const BREAK_ACTIVITIES = [
   { icon: Droplets, text: "Hydrate – grab some water or tea 💧", color: "#06b6d4" },
   { icon: Coffee, text: "Step away for a quick snack 🍎", color: "#f59e0b" },
-  { icon: Stretch, text: "Stand up and stretch for a minute 🧘", color: "#10b981" },
+  { icon: StretchVertical, text: "Stand up and stretch for a minute 🧘", color: "#10b981" },
   { icon: Brain, text: "Look away from the screen – rest your eyes 👀", color: "#7c3aed" },
   { icon: Heart, text: "Take 5 slow breaths 🌬️", color: "#ec4899" },
 ];

@@ -9,7 +9,9 @@ import requests
 import os
 from typing import Optional, Dict, Any
 from pathlib import Path
+import certifi
 import yt_dlp
+
 
 from app.config import settings
 from app.services.storage.adapter import get_storage_adapter
@@ -158,15 +160,22 @@ class YouTubeDownloader:
                 'outtmpl': str(temp_file),
                 'quiet': True,
                 'no_warnings': True,
+
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                # mimic your working script
+
+                # Browser parity (matches CLI behavior)
                 'user_agent': self.browser_headers['User-Agent'],
                 'referer': 'https://www.youtube.com/',
-                'nocheckcertificate': True,
+
+                # ✅ SSL FIX (THIS IS THE KEY)
+                'ca_certs': certifi.where(),
+                'nocheckcertificate': False,
+
+                # Stability
                 'retries': 3,
                 'fragment_retries': 3,
             }
@@ -216,11 +225,17 @@ class YouTubeDownloader:
                     'quiet': True,
                     'no_warnings': True,
                     'outtmpl': str(temp_file.with_suffix('')),
+
                     'user_agent': self.browser_headers['User-Agent'],
-                    'nocheckcertificate': True,
                     'http_headers': self.browser_headers,
+
+                    # ✅ SSL FIX
+                    'ca_certs': certifi.where(),
+                    'nocheckcertificate': False,
+
                     'retries': 3,
                 }
+
                 
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
@@ -239,7 +254,14 @@ class YouTubeDownloader:
                 logger.warning(f"⚠️ yt-dlp failed: {yt_dlp_error}, falling back to requests")
                 
                 # Fallback to requests method
-                response = requests.get(url, stream=True, headers=self.browser_headers, verify=False, timeout=30)
+                response = requests.get(
+                        url,
+                        stream=True,
+                        headers=self.browser_headers,
+                        verify=certifi.where(),
+                        timeout=30
+                    )
+
                 response.raise_for_status()
                 
                 with open(temp_file, "wb") as f:
